@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+
+{% block title %}首页{% endblock %}
+
+{% block content %}
+<div class="card">
+    {% if username %}
+        <h1>欢迎回来，{{ username }}！</h1>
+
+        <div style="margin: 16px 0 20px; border-top: 1px solid #f0f0f0; padding-top: 16px;">
+            <table style="width:100%; border-collapse: collapse; font-size: 14px;">
+                <tr>
+                    <td style="padding: 8px 12px; color: #888; width: 70px;">用户名</td>
+                    <td style="padding: 8px 12px;">{{ user.username }}</td>
+                </tr>
+<tr>
+                    <td style="padding: 8px 12px; color: #888;">邮箱</td>
+                    <td style="padding: 8px 12px;">{{ user.email }}</td>
+                </tr>
+                <tr style="background: #fafafa;">
+                    <td style="padding: 8px 12px; color: #888;">手机</td>
+                    <td style="padding: 8px 12px;">{{ user.phone }}</td>
+                </tr>
+                <tr>
+                    <td style="padding: 8px 12px; color: #888;">角色</td>
+                    <td style="padding: 8px 12px;">
+                        <span style="display:inline-block; padding:2px 8px; border-radius:4px; font-size:12px;
+                            {% if user.role == 'admin' %}background:#f6ffed; color:#52c41a;
+                            {% else %}background:#e6f4ff; color:#1677ff;{% endif %}">
+                            {{ user.role }}
+                        </span>
+                    </td>
+                </tr>
+                <tr style="background: #fafafa;">
+                    <td style="padding: 8px 12px; color: #888;">余额</td>
+                    <td style="padding: 8px 12px; font-weight: bold; color: #cf1322;">
+                        ¥{{ user.balance }}
+                    </td>
+                </tr>
+            </table>
+        </div>
+
+        <div style="display: flex; gap: 10px; margin-top: 4px;">
+            <a href="/logout" style="flex:1; display:block; text-align:center; padding:10px; background:#ff4d4f; color:#fff; border-radius:6px; text-decoration:none; font-size:14px; transition:background 0.2s;"
+               onmouseover="this.style.background='#ff7875'" onmouseout="this.style.background='#ff4d4f'">
+                退出登录
+            </a>
+        </div>
+
+    {% else %}
+        <h1 style="margin-bottom: 12px;">欢迎</h1>
+        <p style="text-align:center; color:#666; margin-bottom: 24px;">请先登录</p>
+        <a href="/login" style="display:block; text-align:center; padding:10px; background:#1677ff; color:#fff; border-radius:6px; text-decoration:none; font-size:15px; transition:background 0.2s;"
+           onmouseover="this.style.background='#4096ff'" onmouseout="this.style.background='#1677ff'">
+            去登录
+        </a>
+    {% endif %}
+</div>
+{% endblock %}

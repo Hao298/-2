@@ -1,0 +1,172 @@
+/* ===== Reset ===== */
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+                 "Helvetica Neue", Arial, sans-serif;
+    background: #f0f2f5;
+    min-height: 100vh;
+}
+
+/* ===== Navigation Bar ===== */
+.navbar {
+    background: linear-gradient(135deg, #667eea, #764ba2);
+    color: #fff;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+}
+
+.nav-inner {
+    max-width: 960px;
+    margin: 0 auto;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 24px;
+    height: 56px;
+}
+
+.brand {
+    color: #fff;
+    font-size: 18px;
+    font-weight: 600;
+    text-decoration: none;
+    letter-spacing: 0.5px;
+}
+
+.nav-right {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+}
+
+.nav-greeting {
+    font-size: 14px;
+    opacity: 0.9;
+    color: #fff;
+}
+
+.nav-link {
+    color: #fff;
+    text-decoration: none;
+    font-size: 14px;
+    padding: 6px 16px;
+    border-radius: 6px;
+    transition: background 0.2s;
+}
+
+.nav-link-login {
+    background: rgba(255, 255, 255, 0.25);
+}
+
+.nav-link-login:hover {
+    background: rgba(255, 255, 255, 0.4);
+}
+
+.nav-link-logout {
+    background: rgba(255, 255, 255, 0.15);
+}
+
+.nav-link-logout:hover {
+    background: rgba(255, 77, 79, 0.7);
+}
+
+/* ===== Main Container ===== */
+.main-container {
+    max-width: 960px;
+    margin: 40px auto;
+    padding: 0 24px;
+}
+
+/* ===== Card ===== */
+.card {
+    background: #fff;
+    border-radius: 8px;
+    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.08);
+    padding: 36px 32px 28px;
+}
+
+.card h1 {
+    font-size: 22px;
+    text-align: center;
+    margin-bottom: 24px;
+    color: #1a1a1a;
+}
+
+/* ===== Form ===== */
+.card label {
+    display: block;
+    font-size: 14px;
+    color: #555;
+    margin-bottom: 6px;
+}
+
+.card input[type="text"],
+.card input[type="password"] {
+    width: 100%;
+    padding: 10px 12px;
+    border: 1px solid #d9d9d9;
+    border-radius: 6px;
+    font-size: 14px;
+    transition: border-color 0.2s;
+}
+
+.card input:focus {
+    outline: none;
+    border-color: #667eea;
+    box-shadow: 0 0 0 2px rgba(102, 126, 234, 0.15);
+}
+
+.card .form-group {
+    margin-bottom: 18px;
+}
+
+.card button {
+    width: 100%;
+    padding: 10px;
+    background: #667eea;
+    color: #fff;
+    border: none;
+    border-radius: 6px;
+    font-size: 15px;
+    cursor: pointer;
+    transition: background 0.2s;
+}
+
+.card button:hover {
+    background: #764ba2;
+}
+
+/* ===== Error Message ===== */
+.error-msg {
+    background: #fff2f0;
+    border: 1px solid #ffccc7;
+    border-radius: 6px;
+    color: #cf1322;
+    font-size: 13px;
+    padding: 10px 14px;
+    margin-bottom: 16px;
+    text-align: center;
+}
+
+/* ===== Footer Link ===== */
+.card .footer-link {
+    text-align: center;
+    margin-top: 18px;
+    font-size: 13px;
+}
+
+.card .footer-link a {
+    color: #667eea;
+    text-decoration: none;
+}
+
+.card .footer-link a:hover {
+    text-decoration: underline;
+}
