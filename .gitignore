@@ -1,6 +1,7 @@
 # Claude AI 会话 / 缓存
 .claude/
 .claude.json
+.claude.json.tmp*
 
 # 系统 / 缓存
 .cache/

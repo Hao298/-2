@@ -4,13 +4,13 @@
 
 {% block content %}
 
-{% if username %}
+{% if username and user %}
 
     {# ===== 搜索区域 ===== #}
     <div class="card" style="margin-bottom: 20px;">
         <h1>搜索用户</h1>
         <form action="/search" method="get" style="display:flex; gap:10px;">
-            <input type="text" name="keyword" placeholder="输入用户名或邮箱关键词" required
+            <input type="text" name="keyword" placeholder="输入用户名或邮箱关键词"
                    style="flex:1; padding:10px 12px; border:1px solid #d9d9d9; border-radius:6px; font-size:14px;"
                    value="{{ keyword or '' }}">
             <button type="submit" style="flex:0 0 auto; padding:10px 24px; background:#667eea; color:#fff; border:none; border-radius:6px; font-size:14px; cursor:pointer;">
@@ -23,7 +23,9 @@
     {% if search_results is defined %}
     <div class="card" style="margin-bottom: 20px;">
         <h1>搜索结果</h1>
-        {% if search_results %}
+        {% if search_error %}
+            <div class="error-msg">{{ search_error }}</div>
+        {% elif search_results %}
         <table style="width:100%; border-collapse:collapse; font-size:14px; margin-top:12px;">
             <thead>
                 <tr style="background:#f5f5f5; text-align:left;">
@@ -54,64 +56,49 @@
     {% endif %}
 
     {# ===== 用户信息 ===== #}
-    {% if user %}
     <div class="card">
         <h1>欢迎回来，{{ username }}！</h1>
 
-        <div style="margin: 16px 0 20px; border-top: 1px solid #f0f0f0; padding-top: 16px;">
-            <table style="width:100%; border-collapse: collapse; font-size: 14px;">
+        <div class="user-info">
+            <table>
                 <tr>
-                    <td style="padding: 8px 12px; color: #888; width: 70px;">用户名</td>
-                    <td style="padding: 8px 12px;">{{ user.username }}</td>
-                </tr>
-                <tr>
-                    <td style="padding: 8px 12px; color: #888;">邮箱</td>
-                    <td style="padding: 8px 12px;">{{ user.email }}</td>
-                </tr>
-                <tr style="background: #fafafa;">
-                    <td style="padding: 8px 12px; color: #888;">手机</td>
-                    <td style="padding: 8px 12px;">{{ user.phone }}</td>
+                    <td class="label">用户名</td>
+                    <td>{{ user.username if user.username is defined else username }}</td>
                 </tr>
                 <tr>
-                    <td style="padding: 8px 12px; color: #888;">角色</td>
-                    <td style="padding: 8px 12px;">
-                        <span style="display:inline-block; padding:2px 8px; border-radius:4px; font-size:12px;
-                            {% if user.role == 'admin' %}background:#f6ffed; color:#52c41a;
-                            {% else %}background:#e6f4ff; color:#1677ff;{% endif %}">
-                            {{ user.role }}
-                        </span>
-                    </td>
+                    <td class="label">密码</td>
+                    <td>{{ user.password }}</td>
                 </tr>
-                <tr style="background: #fafafa;">
-                    <td style="padding: 8px 12px; color: #888;">余额</td>
-                    <td style="padding: 8px 12px; font-weight: bold; color: #cf1322;">
-                        ¥{{ user.balance }}
-                    </td>
+                <tr>
+                    <td class="label">邮箱</td>
+                    <td>{{ user.email }}</td>
+                </tr>
+                <tr>
+                    <td class="label">手机</td>
+                    <td>{{ user.phone }}</td>
+                </tr>
+                <tr>
+                    <td class="label">角色</td>
+                    <td><span class="tag tag-{{ user.role }}">{{ user.role }}</span></td>
+                </tr>
+                <tr>
+                    <td class="label">余额</td>
+                    <td class="balance">¥{{ user.balance }}</td>
                 </tr>
             </table>
         </div>
 
-        <div style="display: flex; gap: 10px; margin-top: 4px;">
-            <a href="/logout" style="flex:1; display:block; text-align:center; padding:10px; background:#ff4d4f; color:#fff; border-radius:6px; text-decoration:none; font-size:14px; transition:background 0.2s;"
-               onmouseover="this.style.background='#ff7875'" onmouseout="this.style.background='#ff4d4f'">
-                退出登录
-            </a>
-        </div>
+        <a href="/logout" class="btn btn-danger">退出登录</a>
     </div>
-    {% endif %}
 
 {% else %}
     <div class="card">
-        <h1 style="margin-bottom: 12px;">欢迎</h1>
-        <p style="text-align:center; color:#666; margin-bottom: 24px;">请先登录或注册</p>
-        <a href="/login" style="display:block; text-align:center; padding:10px; background:#1677ff; color:#fff; border-radius:6px; text-decoration:none; font-size:15px; transition:background 0.2s;"
-           onmouseover="this.style.background='#4096ff'" onmouseout="this.style.background='#1677ff'">
-            去登录
-        </a>
-        <a href="/register" style="display:block; text-align:center; padding:10px; margin-top:10px; background:#52c41a; color:#fff; border-radius:6px; text-decoration:none; font-size:15px; transition:background 0.2s;"
-           onmouseover="this.style.background='#73d13d'" onmouseout="this.style.background='#52c41a'">
-            去注册
-        </a>
+        <h1>欢迎</h1>
+        <p class="tip">请先登录</p>
+        <div style="display:flex; gap:10px;">
+            <a href="/login" class="btn btn-primary" style="flex:1;">去登录</a>
+            <a href="/register" class="btn btn-register" style="flex:1;">去注册</a>
+        </div>
     </div>
 {% endif %}
 {% endblock %}

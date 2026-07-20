@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+
+{% block title %}找回密码{% endblock %}
+
+{% block content %}
+<div class="card">
+    <h1>找回密码</h1>
+
+    {% if error %}
+        <div class="error-msg">{{ error }}</div>
+    {% endif %}
+
+    {# ===== 第一步：手机号 + 验证码 ===== #}
+    {% if step != 2 %}
+    <form method="post" action="/forget_pwd">
+        <div class="form-group">
+            <label for="phone">注册手机号</label>
+            <input type="text" id="phone" name="phone" placeholder="请输入 11 位手机号" required maxlength="11">
+        </div>
+        <div class="form-group">
+            <label>验证码</label>
+            <div style="display:flex; gap:10px; align-items:center;">
+                <input type="text" id="captcha" name="captcha" placeholder="输入验证码" required
+                       style="flex:1; padding:10px 12px; border:1px solid #d9d9d9; border-radius:6px; font-size:14px;">
+                <img src="/captcha" onclick="this.src='/captcha?'+Date.now()" style="cursor:pointer; border-radius:4px; height:40px;" title="点击刷新验证码">
+            </div>
+            <div style="font-size:12px; color:#999; margin-top:4px;">点击图片刷新验证码</div>
+        </div>
+        <button type="submit">下一步</button>
+    </form>
+
+    {# ===== 第二步：重置密码 ===== #}
+    {% else %}
+    <form method="post" action="/reset_pwd">
+        <div class="form-group">
+            <label>手机号</label>
+            <div style="padding:10px 12px; background:#f5f5f5; border-radius:6px; font-size:14px; color:#333;">{{ phone }}</div>
+        </div>
+        <div class="form-group">
+            <label for="new_password">新密码</label>
+            <input type="password" id="new_password" name="new_password" placeholder="请输入新密码" required>
+        </div>
+        <div class="form-group">
+            <label for="confirm_password">确认密码</label>
+            <input type="password" id="confirm_password" name="confirm_password" placeholder="请再次输入新密码" required>
+        </div>
+        <button type="submit">重置密码</button>
+    </form>
+    {% endif %}
+
+    <div class="footer-link">
+        <a href="/login">← 返回登录</a>
+    </div>
+</div>
+{% endblock %}
