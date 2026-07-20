@@ -10,6 +10,10 @@
         <div class="error-msg">{{ error }}</div>
     {% endif %}
 
+    {% if request.args.get('msg') %}
+        <div class="success-msg">{{ request.args.get('msg') }}</div>
+    {% endif %}
+
     <form method="post">
         <div class="form-group">
             <label for="username">用户名</label>
