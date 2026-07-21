@@ -39,3 +39,6 @@ __pycache__/
 *.gif
 *.ico
 *.pdf
+# 上传目录（仅保留图片，不跟踪具体文件）
+static/uploads/*
+!static/uploads/.gitkeep
