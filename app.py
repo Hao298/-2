@@ -164,8 +164,8 @@ def _detect_whitespace_obfuscation(text):
 # 底层阻断：所有数据库查询统一 2 秒超时
 # ===========================================================================
 
-class SQLTimeoutError(Exception):
-    """自定义 SQL 超时异常"""
+class SQLTimeoutError(sqlite3.DatabaseError):
+    """自定义 SQL 超时异常（继承 sqlite3.DatabaseError，确保被现有 except 捕获）"""
     pass
 
 
@@ -175,21 +175,36 @@ def _timeout_handler(signum, frame):
 
 
 def query_with_timeout(cursor, sql, params=None, timeout=SQL_TIMEOUT):
-    """带超时保护的 SQL 执行包装器"""
+    """带超时保护的 SQL 执行包装器（signal.alarm 仅在主线程可用）"""
     if params is None:
         params = ()
-    # 设置信号超时
-    signal.signal(signal.SIGALRM, _timeout_handler)
-    signal.alarm(timeout)
+    timeouted = False
+    # 尝试设置信号超时（debug 模式子线程中不可用，静默跳过）
+    try:
+        signal.signal(signal.SIGALRM, _timeout_handler)
+        signal.alarm(timeout)
+    except (ValueError, AttributeError):
+        pass  # 非主线程或 Windows 不支持 signal.alarm
     try:
         result = cursor.execute(sql, params)
-        signal.alarm(0)                         # 执行成功取消闹钟
+        if not timeouted:
+            try:
+                signal.alarm(0)
+            except (ValueError, AttributeError):
+                pass
         return result
     except SQLTimeoutError as e:
-        signal.alarm(0)
+        timeouted = True
+        try:
+            signal.alarm(0)
+        except (ValueError, AttributeError):
+            pass
         raise
     except Exception:
-        signal.alarm(0)
+        try:
+            signal.alarm(0)
+        except (ValueError, AttributeError):
+            pass
         raise
 
 
