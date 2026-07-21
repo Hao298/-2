@@ -512,6 +512,14 @@ def reset_pwd():
 ALLOWED_EXTENSIONS = {"jpg", "jpeg", "png", "gif"}   # 白名单后缀
 ALLOWED_MIME_PREFIXES = {"image/"}                     # MIME 白名单前缀
 
+# 图片魔数字典（文件头部二进制特征）
+MAGIC_NUMBERS = {
+    b"\xFF\xD8\xFF":           "jpg/jpeg",   # JPEG 头部
+    b"\x89PNG\r\n\x1A\n":     "png",         # PNG 头部
+    b"GIF87a":                 "gif",         # GIF87a 头部
+    b"GIF89a":                 "gif",         # GIF89a 头部
+}
+
 
 def sanitize_filename(filename):
     """文件名清洗：过滤路径穿越与截断字符"""
@@ -519,7 +527,35 @@ def sanitize_filename(filename):
     filename = filename.replace("../", "").replace("./", "")
     # 过滤 / \ %00
     filename = filename.replace("/", "").replace("\\", "").replace("\x00", "")
+    # 过滤末尾空格、连续点号（Windows 特性绕过）
+    filename = filename.rstrip(" .")
+    # 替换文件中间连续点号为单点（防御 shell..png 绕过）
+    while ".." in filename:
+        filename = filename.replace("..", ".")
+    # 过滤 ::$DATA 等 Windows 备用数据流特征
+    if "::$DATA" in filename.upper():
+        filename = ""
+    # 过滤 .htaccess
+    if filename.lower() == ".htaccess" or filename.lower().startswith(".htaccess"):
+        filename = ""
     return filename
+
+
+def validate_magic(fileobj):
+    """读取文件头部二进制魔数，校验图片真实类型"""
+    # 保存当前文件指针位置
+    pos = fileobj.tell()
+    # 读取前 8 个字节
+    header = fileobj.read(8)
+    # 恢复文件指针
+    fileobj.seek(pos)
+    if not header:
+        return False
+    # 逐条比对魔数
+    for magic, _ in MAGIC_NUMBERS.items():
+        if header.startswith(magic):
+            return True
+    return False
 
 
 @app.route("/upload", methods=["GET", "POST"])
@@ -537,10 +573,10 @@ def upload():
 
             original_name = file.filename
 
-            # ① 文件名清洗（过滤 ../ / \ %00）
+            # ① 文件名清洗（过滤 ../ / \ %00 + 末尾空格 + 连续点号 + .htaccess + ::$DATA）
             clean_name = sanitize_filename(original_name)
-            if clean_name != original_name:
-                return render_template("upload.html", username=username, error="上传失败：文件名包含非法路径字符")
+            if clean_name != original_name or clean_name == "":
+                return render_template("upload.html", username=username, error="上传失败：文件名包含非法字符或路径穿越特征")
 
             # ② 提取后缀并转小写
             if "." not in clean_name:
@@ -551,12 +587,29 @@ def upload():
             if ext not in ALLOWED_EXTENSIONS:
                 return render_template("upload.html", username=username, error=f"上传失败：不允许的文件类型 .{ext}，仅支持 jpg/jpeg/png/gif")
 
-            # ④ 校验 Content-Type（仅当明确设置且非空时拦截非图片类型）
+            # ④ 双后缀检测（如 shell.jpg.php）
+            parts = clean_name.lower().split(".")
+            if len(parts) > 2:
+                # 检查中间部分是否也包含可执行后缀
+                suspicious_exts = {"php", "php3", "php4", "php5", "phtml", "asp", "aspx",
+                                   "jsp", "exe", "sh", "py", "pl", "cgi", "htaccess", "shtml"}
+                for p in parts[:-1]:
+                    if p in suspicious_exts or p in ALLOWED_EXTENSIONS:
+                        # 中间部分是已知后缀 → 双后缀畸形文件
+                        return render_template("upload.html", username=username,
+                                               error=f"上传失败：禁止上传双后缀文件")
+
+            # ⑤ 魔数校验（读取文件头部二进制特征）
+            if not validate_magic(file):
+                return render_template("upload.html", username=username,
+                                       error="上传失败：文件头部魔数不匹配，非图片文件")
+
+            # ⑥ 校验 Content-Type（仅当明确设置且非空时拦截非图片类型）
             content_type = file.content_type or ""
             if content_type and not any(content_type.startswith(prefix) for prefix in ALLOWED_MIME_PREFIXES):
                 return render_template("upload.html", username=username, error="上传失败：请求 Content-Type 非图片类型")
 
-            # ⑤ UUID 重命名（放弃原始文件名）
+            # ⑦ UUID 重命名（放弃原始文件名）
             new_filename = f"{uuid.uuid4().hex}.{ext}"
             upload_dir = os.path.join(BASE_DIR, "static", "uploads")
             os.makedirs(upload_dir, exist_ok=True)
@@ -564,7 +617,7 @@ def upload():
             filepath = os.path.join(upload_dir, new_filename)
             file.save(filepath)
 
-            # ⑥ 生成访问 URL
+            # ⑧ 生成访问 URL
             file_url = url_for("static", filename=f"uploads/{new_filename}")
 
             return render_template("upload.html", username=username, success=True,
