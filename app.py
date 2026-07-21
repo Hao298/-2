@@ -10,6 +10,7 @@ import io
 import random
 import re
 import signal
+import uuid
 from PIL import Image, ImageDraw, ImageFont
 
 app = Flask(__name__)
@@ -506,33 +507,71 @@ def reset_pwd():
     return redirect("/login?msg=密码重置成功，请登录")
 
 
-# ===== 用户头像上传 =====
+# ===== 用户头像上传（加固版） =====
+
+ALLOWED_EXTENSIONS = {"jpg", "jpeg", "png", "gif"}   # 白名单后缀
+ALLOWED_MIME_PREFIXES = {"image/"}                     # MIME 白名单前缀
+
+
+def sanitize_filename(filename):
+    """文件名清洗：过滤路径穿越与截断字符"""
+    # 过滤 ../ ./
+    filename = filename.replace("../", "").replace("./", "")
+    # 过滤 / \ %00
+    filename = filename.replace("/", "").replace("\\", "").replace("\x00", "")
+    return filename
+
 
 @app.route("/upload", methods=["GET", "POST"])
 def upload():
-    """用户头像上传 - 保存原始文件名，不做任何类型检查"""
+    """用户头像上传 — 白名单后缀 + UUID 重命名 + MIME 校验 + 异常捕获"""
     username = session.get("username")
     if not username or username not in USERS:
         return redirect("/login")
 
     if request.method == "POST":
-        file = request.files.get("file")
-        if not file or file.filename == "":
-            return render_template("upload.html", username=username, error="请选择要上传的文件")
+        try:
+            file = request.files.get("file")
+            if not file or file.filename == "":
+                return render_template("upload.html", username=username, error="请选择要上传的文件")
 
-        # 保存到 static/uploads/ 目录，使用原始文件名
-        upload_dir = os.path.join(BASE_DIR, "static", "uploads")
-        os.makedirs(upload_dir, exist_ok=True)
+            original_name = file.filename
 
-        # 使用用户上传的原始文件名保存
-        filename = file.filename
-        filepath = os.path.join(upload_dir, filename)
-        file.save(filepath)
+            # ① 文件名清洗（过滤 ../ / \ %00）
+            clean_name = sanitize_filename(original_name)
+            if clean_name != original_name:
+                return render_template("upload.html", username=username, error="上传失败：文件名包含非法路径字符")
 
-        # 生成可访问的 URL
-        file_url = url_for("static", filename=f"uploads/{filename}")
+            # ② 提取后缀并转小写
+            if "." not in clean_name:
+                return render_template("upload.html", username=username, error="上传失败：文件缺少后缀名")
+            ext = clean_name.rsplit(".", 1)[1].lower()
 
-        return render_template("upload.html", username=username, success=True, filename=filename, file_url=file_url)
+            # ③ 白名单校验
+            if ext not in ALLOWED_EXTENSIONS:
+                return render_template("upload.html", username=username, error=f"上传失败：不允许的文件类型 .{ext}，仅支持 jpg/jpeg/png/gif")
+
+            # ④ 校验 Content-Type（仅当明确设置且非空时拦截非图片类型）
+            content_type = file.content_type or ""
+            if content_type and not any(content_type.startswith(prefix) for prefix in ALLOWED_MIME_PREFIXES):
+                return render_template("upload.html", username=username, error="上传失败：请求 Content-Type 非图片类型")
+
+            # ⑤ UUID 重命名（放弃原始文件名）
+            new_filename = f"{uuid.uuid4().hex}.{ext}"
+            upload_dir = os.path.join(BASE_DIR, "static", "uploads")
+            os.makedirs(upload_dir, exist_ok=True)
+
+            filepath = os.path.join(upload_dir, new_filename)
+            file.save(filepath)
+
+            # ⑥ 生成访问 URL
+            file_url = url_for("static", filename=f"uploads/{new_filename}")
+
+            return render_template("upload.html", username=username, success=True,
+                                   filename=new_filename, file_url=file_url)
+
+        except Exception as e:
+            return render_template("upload.html", username=username, error=f"上传失败：{e}")
 
     return render_template("upload.html", username=username)
 
