@@ -1,4 +1,4 @@
-# SQL注入与WAF绕过专项实训报告
+# 文件上传漏洞挖掘与攻防实战实训报告
 
 ---
 
@@ -6,622 +6,589 @@
 
 | 项目 | 内容 |
 |------|------|
-| **实训项目** | SQL注入漏洞挖掘与WAF绕过防御实战 |
+| **实训项目** | 文件上传漏洞挖掘与分层防御实战 |
 | **实训学员** | 大二网络安全专业学生 |
-| **实训日期** | 2026-07-20 |
+| **实训日期** | 2026-07-21 |
 | **实训环境** | Kali Linux 2026.2 / Python Flask + SQLite / Burp Suite |
 | **靶机地址** | 192.168.126.133:5000 |
 | **项目位置** | /opt/Class01/ |
-| **核心文件** | app.py / templates/*.html / static/css/style.css |
+| **项目背景** | 连续三天迭代的Flask用户管理系统，已完成SQL注入/WAF绕过全套防御 |
+| **今日新增** | /upload头像上传模块（原始代码零校验，存在大量高危漏洞） |
+| **核心文件** | app.py / templates/upload.html / static/uploads/ |
 
 ---
 
 ## 二、实验目的
 
-1. 理解字符型联合查询注入的闭合原理与UNION SELECT回显机制
-2. 掌握布尔盲注、时间盲注的逐字猜解与SLEEP延时探测手法
-3. 实操WAF绕过技术：换行符、内联注释、双空格、双层URL编码绕过
-4. 掌握参数化查询从根源防御SQL注入的底层原理
-5. 学习纵深防御体系：WAF过滤 + 参数化查询 + 输出脱敏 + 超时保护
-6. 体验AI批量Fuzz测试语句对WAF的冲击与长度截断防御效果
+1. 理解文件上传漏洞的常见攻击手法：路径穿越、00截断、图片马、双后缀绕过
+2. 掌握黑名单与白名单两种后缀校验方式的本质差异（白名单优于黑名单）
+3. 实操Windows系统特性绕过：尾部空格/点号、`::$DATA`备用数据流
+4. 学习魔数校验原理：通过文件头部二进制特征验证真实文件类型
+5. 理解纵深防御体系：文件名清洗 → 后缀白名单 → 魔数校验 → 内容扫描 → 限流 → 日志
+6. 对比文件上传漏洞与SQL注入的危害差异，建立更全面的漏洞认知
 
 ---
 
 ## 三、今日实训三阶段工作概述
 
-### 第一阶段：课堂理论学习 + Burp渗透测试（09:00-11:00）
+### 第一阶段：业务开发 + 手工Burp渗透（09:00-12:00）
 
-上午课堂学习了四类SQL注入的攻击原理与手工注入7步探测流程：
+上午先快速开发了 `/upload` 头像上传模块，原始代码仅15行，没有任何安全校验：
 
+```python
+# app.py v1.0 — 原始上传代码（零防护）
+@app.route("/upload", methods=["GET", "POST"])
+def upload():
+    username = session.get("username")
+    if not username or username not in USERS:
+        return redirect("/login")
+    if request.method == "POST":
+        file = request.files.get("file")
+        filename = file.filename                    # 直接取原始文件名
+        filepath = os.path.join(upload_dir, filename)
+        file.save(filepath)                          # 直接保存，不做任何检查
+        file_url = url_for("static", filename=f"uploads/{filename}")
+        return render_template("upload.html", success=True, ...)
 ```
-Step1: 单引号闭合探测  ' → 报错
-Step2: 注释绕过       '-- → 消除尾部约束
-Step3: 列数探测       ' ORDER BY N--
-Step4: 联合查询回显   ' UNION SELECT 1,2,3...
-Step5: 条件探测       ' AND 1=1-- / OR '1'='1
-Step6: 系统变量查询   ' UNION SELECT @@version--
-Step7: 元数据读取     ' UNION SELECT table_name FROM information_schema.tables--
+
+随后使用 Burp Suite 对上传接口进行手工渗透测试，**全部攻击验证成功**：
+
+**攻击验证1 — 直接上传WebShell：**
 ```
+POST /upload HTTP/1.1
+Content-Type: multipart/form-data; boundary=----WebKitFormBoundary
 
-使用Burp Suite对靶机登录/搜索接口进行手工注入测试，搜索接口存在f-string拼接漏洞，Payload成功回显数据库内容。
+------WebKitFormBoundary
+Content-Disposition: form-data; name="file"; filename="shell.php"
+Content-Type: image/png
 
-**Burp抓包截图（POC）：**
+<?php system($_GET['cmd']); ?>
+------WebKitFormBoundary--
 ```
-GET /search?keyword=admin' UNION SELECT 1,2,3,4-- HTTP/1.1
-Host: 192.168.126.133:5000
+→ 上传成功，返回 `/static/uploads/shell.php`，浏览器访问即可执行命令。
+
+**攻击验证2 — 路径穿越覆盖文件：**
 ```
-响应返回4列数据，确认注入点可用。
+Content-Disposition: form-data; name="file"; filename="../../../tmp/evil.php"
+```
+→ 上传成功，文件被写入 `/tmp/evil.php`。
 
-### 第二阶段：分步漏洞改造（14:00-16:00）
+**攻击验证3 — 图片马（GIF头+PHP代码）：**
+```
+Content-Disposition: form-data; name="file"; filename="gifshell.php"
+Content-Type: image/gif
 
-针对已发现的注入漏洞，分四轮改造：
+GIF89a<?php phpinfo(); ?>
+```
+→ 上传成功，GIF89a 头部可绕过简单的文件头检查。
 
-| 轮次 | 改造内容 | 核心变更 |
-|------|----------|----------|
-| **第1轮** | 参数化查询改造 | 删除全部f-string拼接，替换为 `?` 占位符 |
-| **第2轮** | WAF过滤层 | 新增 `input_clean()` 全局清洗函数 |
-| **第3轮** | 验证码+鉴权+脱敏 | 新增 `/captcha`、搜索登录校验、输出脱敏 |
-| **第4轮** | 盲注专项防护 | 新增 `query_with_timeout()` 超时保护 + 数字型校验 |
+### 第二阶段：分层漏洞加固改造（14:00-16:00）
 
-### 第三阶段：盲注补充防护 + 最终测试（16:00-17:30）
+针对已发现的漏洞，分两轮加固：
 
-- 新增 `database()`、`/*+` Oracle注释等关键字到过滤列表
-- 新增 `field_type="integer"` 纯整数校验，阻断 `id=3-1` 运算探测
-- 新增双层URL编码解码 `_url_decode()` 两次unquote
-- 新增 `signal.alarm(2)` SQL执行超时保护
-- 所有路由回归测试通过
+| 轮次 | 改造重点 | 新增防御函数 | 覆盖攻击 |
+|------|----------|-------------|----------|
+| **第1轮** | 文件名清洗+后缀白名单+UUID | `sanitize_filename()` / `ALLOWED_EXTENSIONS` | 路径穿越/00截断/大小写/空格/$DATA |
+| **第1轮** | 魔数校验+双后缀检测 | `validate_magic()` / 中间段split检测 | 图片马/双后缀 |
+| **第2轮** | 恶意内容扫描+IP限流 | `scan_malicious_content()` / `check_rate_limit()` | WebShell/批量Fuzz |
+| **第2轮** | 上传日志+安全响应头 | `log_upload()` / `@app.after_request` | 溯源/MIME嗅探 |
+
+### 第三阶段：全用例回归复测（16:00-17:30）
+
+每轮改造后用第一阶段的全部Payload重新测试，确认旧攻击方式不再生效。最终34个TC用例全部通过。
 
 ---
 
 ## 四、漏洞汇总表格
 
-| 漏洞编号 | 漏洞类型 | 风险等级 | 攻击入口 | 是否修复 |
-|----------|----------|----------|----------|----------|
-| VUL-001 | 字符型联合查询注入 | **高危** | `/search?keyword=` | ✅ 已修复 |
-| VUL-002 | 字符型联合查询注入 | **高危** | `/register` POST | ✅ 已修复 |
-| VUL-003 | 布尔盲注（AND/OR探测） | **中危** | `/search` | ✅ 已修复 |
-| VUL-004 | 时间盲注（SLEEP延时） | **中危** | `/search` | ✅ 已修复 |
-| VUL-005 | WAF换行绕过（%0a） | **高危** | 全部GET/POST入口 | ✅ 已修复 |
-| VUL-006 | WAF注释绕过（/**/） | **高危** | 全部GET/POST入口 | ✅ 已修复 |
-| VUL-007 | WAF双层编码绕过（%2527） | **高危** | 全部GET/POST入口 | ✅ 已修复 |
-| VUL-008 | 明文密码泄露 | **中危** | 首页用户信息卡片 | ⚠️ 保留（课堂演示） |
-| VUL-009 | 无验证码暴力破解 | **中危** | `/login` POST | ✅ 已修复 |
-| VUL-010 | 搜索接口未授权访问 | **中危** | `/search` | ✅ 已修复 |
-| VUL-011 | 纯数字邮箱注册500报错 | **低危** | `/register` | ✅ 已修复 |
-| VUL-012 | 数字型运算注入（id=3-1） | **低危** | 潜在整型参数 | ✅ 已修复 |
+| 编号 | 漏洞类型 | 风险等级 | 攻击入口 | 修复状态 |
+|------|----------|----------|----------|----------|
+| VUL-U01 | 路径穿越（../） | **高危** | 文件名参数 | ✅ 已修复 |
+| VUL-U02 | 绝对路径（/） | **高危** | 文件名参数 | ✅ 已修复 |
+| VUL-U03 | 00截断（%00） | **高危** | 文件名参数 | ✅ 已修复 |
+| VUL-U04 | 无后缀白名单 → 任意文件上传 | **高危** | 文件扩展名 | ✅ 已修复 |
+| VUL-U05 | 后缀大小写绕过（.PHP） | **高危** | 文件扩展名 | ✅ 已修复 |
+| VUL-U06 | Windows尾部空格/点号绕过 | **中危** | 文件名参数 | ✅ 已修复 |
+| VUL-U07 | ::$DATA备用数据流绕过 | **中危** | 文件名参数 | ✅ 已修复 |
+| VUL-U08 | .htaccess配置文件上传 | **高危** | 文件名参数 | ✅ 已修复 |
+| VUL-U09 | 双后缀畸形（shell.jpg.php） | **高危** | 文件扩展名 | ✅ 已修复 |
+| VUL-U10 | 图片马（伪造头部+恶意代码） | **高危** | 文件内容 | ✅ 已修复 |
+| VUL-U11 | WebShell直接上传（PHP/脚本） | **高危** | 文件内容 | ✅ 已修复 |
+| VUL-U12 | Content-Type伪造 | **中危** | Content-Type头 | ✅ 已修复 |
+| VUL-U13 | 原始文件名不做UUID重命名 | **中危** | 文件存储 | ✅ 已修复 |
+| VUL-U14 | 无上传限流 → 批量Fuzz | **中危** | POST频次 | ✅ 已修复 |
+| VUL-U15 | 无上传日志 → 攻击溯源困难 | **低危** | 审计 | ✅ 已修复 |
+| VUL-U16 | 无安全响应头 → XSS执行 | **中危** | 静态文件响应 | ✅ 已修复 |
+| VUL-U17 | 无异常捕获 → 500信息泄露 | **低危** | 异常处理 | ✅ 已修复 |
 
 ---
 
-## 五、分项漏洞原理 + POC复现 + 分层修复
+## 五、分项漏洞原理 + POC复现 + 分层修复代码方案
 
-### 5.1 VUL-001 搜索接口字符型联合查询注入
-
-#### 漏洞原理
-
-原始代码使用f-string拼接SQL语句，用户输入直接嵌入查询字符串，攻击者可闭合前引号后执行任意SQL语句：
-
-```python
-# 原始危险代码（v1.0）
-sql = f"SELECT id, username, email, phone FROM users WHERE username LIKE '%{keyword}%' OR email LIKE '%{keyword}%'"
-print(f"[SQL] {sql}")
-results = c.execute(sql).fetchall()
-```
-
-攻击者输入 `admin' UNION SELECT 1,2,3,4--` 后，实际执行的SQL变为：
-
-```sql
-SELECT id, username, email, phone FROM users WHERE username LIKE '%admin' UNION SELECT 1,2,3,4--%' OR email LIKE '%...%'
-```
-
-`'--` 闭合前引号 + 注释掉后续语句，UNION SELECT成功叠加回显。
-
-#### POC复现
-
-**Burp Suite Payload：**
-```
-GET /search?keyword=admin' UNION SELECT 1,2,3,4-- HTTP/1.1
-```
-
-**curl测试命令：**
-```bash
-# 注入验证 —— 原始漏洞版本返回了 1,2,3,4
-curl -sb cookies.txt "http://192.168.126.133:5000/search?keyword=%27%20UNION%20SELECT%201,2,3,4--"
-# 响应中包含 "2" "3" "4" 字样，确认注入成功
-```
-
-**系统变量查询：**
-```bash
-curl -sb cookies.txt "http://192.168.126.133:5000/search?keyword=%27%20UNION%20SELECT%20@@version,2,3,4--"
-```
-
-#### 分层修复方案
-
-| 层级 | 修复措施 | 代码位置 | 说明 |
-|------|----------|----------|------|
-| **底层根治** | 参数化查询 `?` 占位符 | app.py L351-353 | 从协议层分离SQL代码与数据，单引号闭合彻底失效 |
-| **辅助防护1** | `input_clean(keyword, "keyword")` | app.py L341 | 前置过滤单引号、关键字union/select、注释符 |
-| **辅助防护2** | WAF黑名单 `SQL_KEYWORDS` | app.py L50-63 | 52个敏感关键字全词正则匹配 |
-| **辅助防护3** | `COMMENT_PATTERNS` 注释符检测 | app.py L73-77 | `--` `#` `/**/` 全部拦截 |
-| **辅助防护4** | 搜索登录鉴权 | app.py L332-333 | 未登录302跳转，禁止匿名Fuzz |
-| **辅助防护5** | 输出脱敏 | app.py L199-225 | 即使注入成功，回显数据被脱敏 |
-| **辅助防护6** | `query_with_timeout()` 超时 | app.py L176-188 | SLEEP等延时函数2秒超时截断 |
-
-**修复后代码：**
-```python
-# 修复代码（v5.0）
-keyword = input_clean(keyword, "keyword", KEYWORD_MAX_LEN)  # WAF前置过滤
-like_pattern = f"%{keyword}%"
-rows = query_with_timeout(c,
-    "SELECT id, username, email, phone FROM users WHERE username LIKE ? OR email LIKE ?",
-    (like_pattern, like_pattern)
-).fetchall()
-results = [(row[0], mask_username(row[1]), mask_email(row[2]), mask_phone(row[3])) for row in rows]
-# 输出: (2, "a***", "a***@example.com", "139****9001")
-```
-
----
-
-### 5.2 VUL-003 / VUL-004 布尔盲注 + 时间盲注
+### 5.1 VUL-U01~U03 路径穿越 + 00截断
 
 #### 漏洞原理
 
-布尔盲注利用 `AND 1=1` 与 `AND 1=2` 页面差异逐字猜解数据；时间盲注通过 `SLEEP(5)` 延时判断条件真假。
+原始代码直接使用 `file.filename` 拼接路径，攻击者传入 `../../etc/shell.php` 时实际保存路径为 `/opt/Class01/static/uploads/../../etc/shell.php` → 简化后指向 `/opt/Class01/etc/shell.php`，实现了任意目录写入。
 
-**原始代码f-string拼接盲注探测示例：**
-```sql
--- 布尔盲注探测
-SELECT ... WHERE username LIKE '%admin' AND 1=1--%' ...
--- 页面正常返回 → 注入成立
-
--- 时间盲注探测  
-SELECT ... WHERE username LIKE '%admin' AND IF(1=1,SLEEP(5),0)--%' ...
--- 响应延迟5秒 → 注入成立
-```
-
-#### 分层修复方案
-
-| 层级 | 修复措施 | 代码位置 | 说明 |
-|------|----------|----------|------|
-| **底层根治** | 参数化查询 | L351-353 | `?` 占位符使 `AND 1=1` 成为纯字符串，不解析为SQL |
-| **WAF拦截** | `SQL_KEYWORDS` | L50 L56 L57 | `and` `or` `if` `sleep` `benchmark` `delay` `length` `substr` 全部关键字拦截 |
-| **超时兜底** | `query_with_timeout()` | L176-188 | `signal.alarm(2)` 2秒硬上限，SLEEP(5)被SIGALRM信号截断 |
-| **异常捕获** | `try-except` 中文提示 | L364-368 | 超时报错不暴露SQL细节 |
-
-**修复后效果验证：**
-```python
-# 时间盲注 — 关键字拦截 + 超时防御
-def _timeout_handler(signum, frame):
-    raise SQLTimeoutError("SQL 执行超时（检测到疑似 SLEEP 延时注入）")
-
-def query_with_timeout(cursor, sql, params=None, timeout=SQL_TIMEOUT):
-    signal.signal(signal.SIGALRM, _timeout_handler)
-    signal.alarm(timeout)          # 设置2秒定时炸弹
-    try:
-        result = cursor.execute(sql, params)
-        signal.alarm(0)             # 正常返回取消闹钟
-        return result
-    except SQLTimeoutError:
-        signal.alarm(0)
-        raise                       # 超时抛出，前端显示中文提示
-```
-
----
-
-### 5.3 VUL-005 / VUL-006 / VUL-007 WAF变形绕过
-
-#### 漏洞原理
-
-攻击者通过特殊字符变形绕过关键字黑名单检测：
-
-| 绕过手法 | 原始Payload | 变形Payload | 绕过目标 |
-|----------|-------------|-------------|----------|
-| 换行绕过 | `admin' OR 1=1--` | `admin%0aOR%0a1=1--` | `or` 不在同一行 → 正则漏检 |
-| 内联注释 | `UNION SELECT` | `UN/**/ION SEL/**/ECT` | 关键字被分割 → 全词匹配失效 |
-| 双空格 | `OR 1=1` | `OR  1=1` | \bOR\b 误用空格token通过 |
-| 双层编码 | `'` | `%2527` → 解码一次 `%27` → 再解码 `'` | 单层解码后仍是编码态 → 漏检 |
+`%00` 截断利用C语言字符串以NULL结尾的特性：`shell.php\x00.png` → 系统截取为 `shell.php`。
 
 #### POC复现
 
 ```bash
-# %0a 换行绕过（原始WAF未拦截时）
-curl -sb cookies.txt "http://192.168.126.133:5000/search?keyword=admin%0aOR%0a1=1--"
+# 绝对路径穿越
+curl -F "file=@shell.php;filename=/etc/passwd.php" -b cookies.txt \
+  "http://192.168.126.133:5000/upload"
 
-# /*!*/ 内联注释绕过
-curl -sb cookies.txt "http://192.168.126.133:5000/search?keyword=admin'%20UNION%20/*!*/SELECT%201,2,3,4--"
-
-# %2527 双层URL编码（第一次解码%25→%，第二次解码%27→'）
-curl -sb cookies.txt "http://192.168.126.133:5000/search?keyword=admin%2527"
+# 00截断
+curl -F "file=@shell.php;filename=shell.php%00.png" -b cookies.txt \
+  "http://192.168.126.133:5000/upload"
 ```
 
 #### 分层修复方案
 
-| 层级 | 绕过手法 | 修复代码 | 位置 | 原理 |
-|------|----------|----------|------|------|
-| **底层** | `%0a` `%0d` | `WHITESPACE_CHARS` → `_detect_whitespace_obfuscation()` | L66-68 L149-158 | URL解码后检测 `\n` `\r` `\t` `\x0b` `\x0c` `\xa0` |
-| **底层** | `/**/` `/*!*/` | `COMMENT_PATTERNS` 循环检测 | L73-77 L100 | `"/**/"` `"/*!"` `"/*"` `"*/"` `"/*+"` 6种注释模式 |
-| **底层** | 双空格 | `_detect_whitespace_obfuscation()` | L155-156 | `"  "` 检测两个及以上连续空格 |
-| **底层** | `%2527` 双层编码 | `_url_decode()` 两次 unquote | L134-142 | 循环解码2次，最终得到原始字符重新检测 |
-| **底层** | `--` `#` `;` | `COMMENT_PATTERNS` | L73-77 | 行注释 + 堆叠查询全拦截 |
-| **底层** | 反引号 `\`` | 引号检测 + `COMMENT_PATTERNS` | L75 L110-112 | `"``"` 双通道拦截 |
-| **辅助** | 超长Fuzz | `input_clean()` 长度截断 | L86-88 | `>400` 拒绝 + `[:max_len]` 安全截断 |
+| 层级 | 修复措施 | 代码 | 行号 |
+|------|----------|------|------|
+| **底层根治** | 替换 `../` `/` `\\` `\x00` 为空 | `.replace("../","").replace("/","").replace("\\","").replace("\x00","")` | L604-605 |
+| **辅助检测** | 清洗前后比对，不一致则拒绝 | `if clean_name != original_name: return error` | L658-660 |
+| **底层根除** | UUID重命名，彻底消除路径拼接风险 | `uuid.uuid4().hex` + `.ext` | L701-702 |
 
-**修复后效果：**
 ```python
-# 双层URL解码防御
-def _url_decode(s):
-    decoded = s
-    for _ in range(2):                     # 两次解码拦截双重编码
-        prev = decoded
-        decoded = urllib.parse.unquote(decoded)
-        if decoded == prev:
-            break
-    return decoded
+def sanitize_filename(filename):
+    filename = filename.replace("../", "").replace("./", "")
+    filename = filename.replace("/", "").replace("\\", "").replace("\x00", "")
+    # ...
+    return filename
 
-# 空表符检测
-def _detect_whitespace_obfuscation(text):
-    for ch in text:
-        if ch in WHITESPACE_CHARS and ch != " ":
-            raise ValueError(f"WAF 拦截：检测到非法空白符 {repr(ch)}")
-    if "  " in text:
-        raise ValueError("WAF 拦截：检测到连续空白符")
+# upload() 中：
+clean_name = sanitize_filename(original_name)
+if clean_name != original_name or clean_name == "":
+    return render_template("upload.html", error="上传失败：文件名包含非法字符或路径穿越特征")
 ```
 
 ---
 
-### 5.4 VUL-012 数字型运算注入
+### 5.2 VUL-U04~U05 后缀白名单缺失 + 大小写绕过
 
 #### 漏洞原理
 
-数字型参数如果只做 `is not None` 检查而不做类型校验，攻击者可传入 `3-1` 利用SQL内部隐式类型转换探测数据库：
+原始代码未检查文件扩展名，任意后缀均可上传。即使加黑名单，`.PHP` `.Php` 等大小写变形即可绕过。
 
-```sql
--- 传入 id=3-1，SQL解析为
-SELECT * FROM users WHERE id = 3-1     -- 等同于 WHERE id = 2
+**黑名单的缺陷**：需要穷举所有可能的恶意后缀，理论上不可能完成。**白名单**只枚举安全的类型，简单直接且无法绕过。
+
+#### POC复现
+
+```bash
+# 直接上传 PHP 文件
+curl -F "file=@webshell.php;type=image/png" -b cookies.txt \
+  "http://192.168.126.133:5000/upload"
+
+# 访问上传的WebShell执行命令
+curl "http://192.168.126.133:5000/static/uploads/webshell.php?cmd=id"
 ```
 
-#### 修复措施
-
-新增 `field_type="integer"` 严格纯整数校验：
+#### 分层修复方案
 
 ```python
-elif field_type == "integer":
-    if not re.match(r'^\d+$', value):
-        raise ValueError("WAF 拦截：数字参数包含非法字符（拒绝算术表达式）")
+ALLOWED_EXTENSIONS = {"jpg", "jpeg", "png", "gif"}
+ext = clean_name.rsplit(".", 1)[1].lower()    # 关键：转小写
+if ext not in ALLOWED_EXTENSIONS:              # 白名单校验
+    return render_template("upload.html", error=f"不允许的文件类型 .{ext}")
 ```
-
-| 输入 | 校验结果 |
-|------|----------|
-| `42` | ✅ 纯整数通过 |
-| `3-1` | ❌ 拦截 |
-| `3+1` | ❌ 拦截 |
-| `3*2` | ❌ 拦截 |
-| `3/1` | ❌ 拦截 |
-| `3.5` | ❌ 拦截 |
 
 ---
 
-### 5.5 VUL-009 无验证码暴力破解
+### 5.3 VUL-U06~U07 Windows特性绕过（空格/点号/::$DATA）
 
 #### 漏洞原理
 
-登录/注册/找回密码接口无验证码校验，攻击者可自动化工具批量爆破密码。
+| 攻击方式 | 上传文件名 | 实际保存文件名 | 绕过原理 |
+|----------|-----------|---------------|----------|
+| 尾部空格 | `shell.php ` | `shell.php` | Windows自动去除末尾空格 |
+| 尾部点号 | `shell.php.` | `shell.php` | Windows自动去除末尾点号 |
+| 连续点号 | `shell..png` | 可能被截断 | `..` 被解释为上层目录 |
+| `::$DATA` | `test.php::$DATA` | `test.php` | NTFS备用数据流，之后内容被忽略 |
 
-#### 修复措施
-
-新增 `/captcha` 图形验证码接口（PNG图片 + session比对）：
-
-| 路由 | 验证码校验位置 |
-|------|---------------|
-| `/login` POST | L270-272 |
-| `/register` POST | L339-341 |
-| `/forget_pwd` POST | L438-440 |
+#### 修复方案
 
 ```python
-# 验证码生成（4位随机数字 + 干扰线 + 噪点）
-@app.route("/captcha")
-def captcha():
-    code = str(random.randint(1000, 9999))
-    session["captcha"] = code
-    # 绘制120×40 PNG图片...
-    
-# 表单校验
-if session.get("captcha") != captcha_input:
-    return render_template("login.html", error="验证码错误")
+filename = filename.rstrip(" .")              # 清洗末尾空格和点号
+while ".." in filename:
+    filename = filename.replace("..", ".")     # 折叠连续点号
+if "::$DATA" in filename.upper():             # 检测备用数据流
+    filename = ""
 ```
 
 ---
 
-### 5.6 VUL-010 搜索接口未授权访问
+### 5.4 VUL-U08 .htaccess 配置文件上传
 
 #### 漏洞原理
 
-搜索接口未做登录检查，匿名用户可直接访问 `/search?keyword=xxx` 进行批量Fuzz拖库。
+上传 `.htaccess` 可修改Apache目录配置，使图片被当作PHP执行：
 
-#### 修复措施
+```apache
+AddType application/x-httpd-php .png
+```
+
+上传后目录下所有 `.png` 文件都会被解析为PHP，配合图片马上传即可getshell。
+
+#### 修复方案
 
 ```python
-@app.route("/search")
-def search():
-    username = session.get("username")
-    if not username or username not in USERS:
-        return redirect("/login")          # 未登录 → 302跳转
+if filename.lower() == ".htaccess" or filename.lower().startswith(".htaccess"):
+    filename = ""
 ```
 
 ---
 
-### 5.7 VUL-008 / VUL-011 信息泄露与异常处理
+### 5.5 VUL-U09 双后缀畸形绕过
 
-| 漏洞 | 问题 | 修复 |
-|------|------|------|
-| 明文密码 | 首页显示用户密码 | ⚠️ 课堂演示保留，生产必改bcrypt |
-| 纯数字邮箱500 | SQLite `UNIQUE` 约束未捕获 | `try-except IntegrityError` 中文提示 |
-| SQL报错信息 | `OperationalError` 暴露原始错误 | 统一捕获返回"数据库异常" |
+#### 漏洞原理
+
+`shell.jpg.php` 后缀是 `.php` 被白名单拦截，但 `shell.php.jpg` 后缀是 `.jpg` 可绕过白名单。Apache旧版本可能优先识别 `.php` 执行。
+
+#### 修复方案
+
+```python
+parts = clean_name.lower().split(".")
+if len(parts) > 2:
+    suspicious_exts = {"php", "php3", "php4", "phtml", "asp", "aspx",
+                       "jsp", "exe", "sh", "py", "cgi", "htaccess"}
+    for p in parts[:-1]:                    # 检查中间段
+        if p in suspicious_exts or p in ALLOWED_EXTENSIONS:
+            return render_template("upload.html", error="禁止上传双后缀文件")
+```
+
+---
+
+### 5.6 VUL-U10~U11 图片马 + WebShell
+
+#### 漏洞原理
+
+**图片马制作：**
+```bash
+echo 'GIF89a<?php @eval($_POST["c"]);?>' > shell.gif.php
+```
+
+将PHP代码隐藏在GIF/PNG文件头部二进制签名之后，仅检查文件头的校验会被绕过。
+
+**WebShell直接上传**则不需要伪装：
+```bash
+echo '<?php system($_GET["cmd"]);?>' > cmd.php
+```
+
+#### 分层修复方案
+
+| 层级 | 修复措施 | 代码 | 行号 |
+|------|----------|------|------|
+| **底层-魔数校验** | 读取前8字节比对JPEG/PNG/GIF签名 | `validate_magic()` → `MAGIC_NUMBERS` | L620-634 |
+| **底层-内容扫描** | 17种恶意特征全量匹配 | `scan_malicious_content()` → `MALICIOUS_PATTERNS` | L553-571 |
+
+```python
+MAGIC_NUMBERS = {
+    b"\xFF\xD8\xFF":           "jpg/jpeg",
+    b"\x89PNG\r\n\x1A\n":     "png",
+    b"GIF87a":                 "gif",
+    b"GIF89a":                 "gif",
+}
+
+def validate_magic(fileobj):
+    header = fileobj.read(8)
+    fileobj.seek(0)                             # 恢复指针，否则后续保存空文件
+    for magic in MAGIC_NUMBERS:
+        if header.startswith(magic):
+            return True
+    return False
+
+MALICIOUS_PATTERNS = [
+    b"<?php", b"<?=",                    # PHP代码/短标签
+    b"<script", b"javascript:",          # XSS
+    b"eval(", b"system(", b"exec(",      # 危险函数
+    b"base64_decode(", b"passthru(",     # 编码/执行
+    b"shell_exec(", b"<?xml",            # 命令执行/XXE
+]
+```
+
+---
+
+### 5.7 VUL-U12~U17 配套防御
+
+| 漏洞 | 问题 | 修复代码 | 行号 |
+|------|------|----------|------|
+| Content-Type伪造 | 未校验请求MIME | `if content_type and not content_type.startswith("image/"):` | L697-699 |
+| UUID重命名 | 原始文件名可遍历/覆盖 | `uuid.uuid4().hex + "." + ext` | L701-702 |
+| IP限流 | 批量Fuzz扫描 | `check_rate_limit(ip)` 每分钟最多5次 | L523-532 |
+| 上传日志 | 攻击溯源无依据 | `log_upload()` 写入logs/upload.log | L546-550 |
+| 安全响应头 | 浏览器MIME嗅探执行 | `X-Content-Type-Options: nosniff` | L574-579 |
+| 异常捕获 | 500错误暴露路径 | `try-except Exception` 中文提示 | L645-713 |
+| 16MB限制 | 大文件DoS | `MAX_CONTENT_LENGTH = 16MB` | L16 |
 
 ---
 
 ## 六、踩坑故障记录
 
-### 坑1：debug=True 导致数据库路径错位
+### 坑1：Flask test_client Content-Type 为空
 
-**现象：** Flask debug模式会重载两次子进程，`os.makedirs("data")` 相对路径从 `/opt/Class01/` 偏移到 `/root/`，两个目录各有一个 `users.db`，注册数据在 `/root/data/` 而搜索读 `/opt/Class01/data/`，互相无法查到。
+**现象：** 用 `(io.BytesIO(b"x"), "test.png")` 二元组构造测试文件时，`file.content_type` 返回空字符串，导致 Content-Type 校验误拦截。
 
-**解决：** 使用 `BASE_DIR = os.path.dirname(os.path.abspath(__file__))` 绝对路径拼接。
+**解决：** 后端逻辑改为：Content-Type 为空时不拦截，仅在明确设置且非 `image/` 前缀时才拒绝。
 
----
+### 坑2：魔数校验后文件指针偏移导致保存空文件
 
-### 坑2：搜索页未传递 user 信息 → 显示"请先登录"
+**现象：** 魔数校验读取前8字节后没有恢复指针，后续 `file.save()` 从偏移8开始保存，文件内容缺失了前8字节。
 
-**现象：** 搜索路由返回 `index.html` 时没有传 `user=user_info` 参数，虽然session里有username，但模板判断 `{% if username and user %}` 失败，已登录用户看到"请先登录"。
+**解决：** 魔数校验函数末尾添加 `fileobj.seek(0)` 恢复指针。
 
-**解决：** search() 中补充：
-```python
-username = session.get("username")
-user_info = None
-if username and username in USERS:
-    user_info = USERS[username]
-```
+### 坑3：限流计数器在测试中不重置
 
----
+**现象：** 第6次上传被限流拦截后，后续所有测试请求都被限流。
 
-### 坑3：单引号转义 `"'"` 后仍偶发500
+**解决：** 分组测试之间手动 `_rate_store.clear()`。生产环境限流是期望行为。
 
-**现象：** 使用 `.replace("'", "''")` 做转义，但输入 `\` 反斜杠时存在转义逃逸：`\'` → `''` 后变成 `\''` 导致SQL语法错误。
+### 坑4：双后缀检测误伤合法文件
 
-**解决：** 最终方案不是修转义，而是彻底删除f-string拼接，改用参数化查询 `?` 占位符，引号问题从根源消失。
+**现象：** `my.profile.png` 被误拦截，因 `split(".")` 检测到 `profile` 不是合法后缀。
 
----
+**解决：** 只在中间段是**已知可执行后缀**或**已知图片后缀**时才拦截，普通单词放行。
 
-### 坑4：WAF关键字 `or` 误杀正常用户名
+### 坑5：双后缀的 shell.jpg.php 实际被白名单拦截
 
-**现象：** `SQL_KEYWORDS` 中 `"or"` 全词匹配时，用户注册 `admin` 没影响，但用户名 `worker` 中的 `or` 被拦截。
+**现象：** 测试 `shell.jpg.php` 时，最外层的后缀白名单直接拦截了 `.php`，双后缀检测代码分支根本没走到。
 
-**解决：** 使用 `\b` 正则全词匹配而非 `in` 字符串包含：
-```python
-# 正确：全词匹配
-if re.search(r'\b' + re.escape("or") + r'\b', "worker")  # False → 不拦截
-# 错误：字符串包含
-if "or" in "worker":  # True → 误杀
-```
+**解决：** 这是白名单本身的有效性验证，不是问题。双后缀检测在实际场景中（黑名单系统或中间件解析漏洞）才有真正意义。
 
 ---
 
-### 坑5：搜索结果脱敏断言失败
+## 七、修复前后安全对比表格
 
-**现象：** 测试时断言 `assert "139****0001" in html` 失败，实际脱敏结果是 `139****9001`（alice手机号后4位是9001，不是0001）。
-
-**解决：** 测试数据写错了，核对数据库后修正断言。
-
----
-
-## 七、修复前后对比表格
-
-| 对比项 | 修复前（v1.0） | 修复后（v5.0） |
-|--------|---------------|---------------|
-| **SQL查询方式** | f-string拼接 | 参数化 `?` 占位符 |
-| **引号处理** | `.replace("'", "''")` | 不需要（参数化自动处理） |
-| **注册输入** | 无校验直接拼接 | `input_clean()` + 邮箱格式校验 |
-| **搜索访问** | 无需登录 | 登录鉴权 + 输出脱敏 |
-| **验证码** | 无 | `/captcha` PNG验证码 |
-| **关键字过滤** | 无 | 52个SQL关键字全词正则 |
-| **注释过滤** | 无 | 6种注释模式 + 空白符 |
-| **URL解码** | 单层解码 | 双层解码防双重编码绕过 |
-| **SQL超时** | 无 | `signal.alarm(2)` 2秒上限 |
-| **数字校验** | 无类型区分 | `integer`/`phone`/`keyword` 分离校验 |
-| **错误处理** | 抛出500 | `try-except` 中文提示 |
-| **控制台** | `print(f"[SQL] {sql}")` 泄露 | 全部删除 |
+| 对比维度 | 修复前（v1.0） | 修复后（v5.0） |
+|----------|---------------|---------------|
+| **文件名处理** | 直接使用原始文件名 | `sanitize_filename()` 清洗 + UUID重命名 |
+| **后缀校验** | 无 | 白名单 `jpg/jpeg/png/gif` + 转小写 |
+| **路径穿越防御** | 无 | 替换 `../` `/` `\\` `\x00` + 清洗前后比对 |
+| **Windows特性** | 无 | `rstrip(" .")` + `::$DATA`检测 + 连续点号折叠 |
+| **配置文件** | 无 | `.htaccess` 全小写比对拦截 |
+| **双后缀** | 无 | `split(".")` 中间段检查 |
+| **魔数校验** | 无 | JPEG/PNG/GIF 头部二进制签名验证 |
+| **恶意内容扫描** | 无 | 17种特征匹配（PHP/脚本/命令执行） |
+| **Content-Type** | 无 | 明确非image/前缀时拒绝 |
+| **IP限流** | 无 | 每分钟最多5次上传 |
+| **上传日志** | 无 | USER+IP+ORIG+SAVE 写入日志文件 |
+| **安全响应头** | 无 | `X-Content-Type-Options: nosniff` |
+| **异常处理** | 无 | `try-except` 中文提示 |
+| **文件大小限制** | 无 | `MAX_CONTENT_LENGTH = 16MB` |
 
 ---
 
 ## 八、复测用例
 
-### 8.1 正常业务流程（确认不改坏）
+### 8.1 正常业务流程
 
-| 用例 | 操作 | 预期结果 |
+| 编号 | 操作 | 预期结果 |
 |------|------|----------|
-| TC-01 | 注册新用户 | 302跳转登录页 |
-| TC-02 | admin登录 | 显示"欢迎回来，admin！" |
-| TC-03 | 搜索关键词`alice` | 搜索结果表格含用户名/邮箱/手机（脱敏） |
-| TC-04 | 找回密码+重置 | 302跳转登录页提示"密码重置成功" |
-| TC-05 | 登出后访问首页 | 显示"请先登录" |
+| TC-U01 | 登录后上传真实PNG图片 | 成功，UUID文件名，可预览 |
+| TC-U02 | 未登录访问/upload | 302跳转到/login |
+| TC-U03 | 空文件提交 | 提示"请选择要上传的文件" |
 
-### 8.2 注入攻击阻断（确认拦截生效）
+### 8.2 路径穿越 + 00截断
 
-| 用例 | Payload | 预期拦截结果 |
+| 编号 | Payload | 预期拦截结果 |
 |------|---------|-------------|
-| TC-06 | `admin'` | WAF拦截：单引号 |
-| TC-07 | `admin'--` | WAF拦截：注释符 |
-| TC-08 | `admin' ORDER BY 1--` | WAF拦截：ORDER BY |
-| TC-09 | `admin' UNION SELECT 1,2,3,4--` | WAF拦截：UNION SELECT |
-| TC-10 | `admin' AND 1=1--` | WAF拦截：AND + 单引号 |
-| TC-11 | `admin' UNION SELECT @@version--` | WAF拦截：@@version |
-| TC-12 | `admin' UNION SELECT database()--` | WAF拦截：database( |
-| TC-13 | `admin' UNION SELECT * FROM information_schema.tables--` | WAF拦截：information_schema |
+| TC-U04 | `../../../etc/shell.php` | 拦截：非法路径字符 |
+| TC-U05 | `/etc/passwd.php` | 拦截：非法路径字符 |
+| TC-U06 | `..\\..\\shell.php` | 拦截：非法路径字符 |
+| TC-U07 | `shell.php\x00.png` | 拦截：非法路径字符 |
 
-### 8.3 WAF绕过变形（确认各种变形均被拦截）
+### 8.3 后缀白名单 + 大小写
 
-| 用例 | 绕过手法 | 预期拦截结果 |
+| 编号 | Payload | 预期拦截结果 |
 |------|---------|-------------|
-| TC-14 | `admin%0aOR%0a1=1` | WAF拦截：非法空白符 |
-| TC-15 | `admin/**/OR/**/1=1` | WAF拦截：注释符 |
-| TC-16 | `admin/*!*/` | WAF拦截：注释符 |
-| TC-17 | `admin%2527` 双层编码 | WAF拦截：单引号（双层解码后） |
-| TC-18 | `admin  OR  1=1` 双空格 | WAF拦截：连续空白符 |
-| TC-19 | `` admin` `` 反引号 | WAF拦截：非法引号 |
-| TC-20 | `a`*500 超长Fuzz | WAF拦截：输入超长 |
+| TC-U08 | `test.php` | 拦截：不允许的文件类型 |
+| TC-U09 | `test.asp` | 拦截 |
+| TC-U10 | `test.pHp` | 拦截（转小写后匹配）|
+| TC-U11 | `test.pNg` | 允许（转小写后匹配白名单）|
 
-### 8.4 辅助防御（确认配套机制生效）
+### 8.4 Windows特性绕过
 
-| 用例 | 操作 | 预期结果 |
+| 编号 | Payload | 预期拦截结果 |
+|------|---------|-------------|
+| TC-U12 | `shell.php `（尾部空格）| 拦截：非法字符 |
+| TC-U13 | `shell.php.`（尾部点号）| 拦截：非法字符 |
+| TC-U14 | `shell..png`（连续点号）| 拦截：非法字符 |
+| TC-U15 | `test.php::$DATA` | 拦截：非法字符 |
+
+### 8.5 配置文件 + 双后缀
+
+| 编号 | Payload | 预期拦截结果 |
+|------|---------|-------------|
+| TC-U16 | `.htaccess` | 拦截：非法字符 |
+| TC-U17 | `.HtAccess` | 拦截 |
+| TC-U18 | `shell.jpg.php` | 拦截：不允许的文件类型 |
+| TC-U19 | `a.png.php3` | 拦截：不允许的文件类型 |
+
+### 8.6 图片马 + WebShell
+
+| 编号 | Payload | 预期拦截结果 |
+|------|---------|-------------|
+| TC-U20 | `GIF89a<?php phpinfo();?>` 伪装 `.png` | 魔数通过 + 内容扫描拦截 |
+| TC-U21 | `<script>alert(1)</script>` 伪装 `.png` | 魔数未通过或内容扫描拦截 |
+| TC-U22 | `<?php @eval($_POST['c']);?>` 伪装 `.png` | 魔数未通过或内容扫描拦截 |
+| TC-U23 | 纯文本文件改后缀 `.png` | 魔数校验拦截 |
+
+### 8.7 配套防御
+
+| 编号 | 操作 | 预期结果 |
 |------|------|----------|
-| TC-21 | 验证码错误 | 提示"验证码错误"，不执行后续逻辑 |
-| TC-22 | 未登录访问`/search` | 302跳转到`/login` |
-| TC-23 | 搜索手机号完整显示 | 页面显示`139****9001`，非完整号码 |
-| TC-24 | 手机号输入字母 | 提示"手机号格式错误" |
-| TC-25 | `id=3-1` 运算式 | WAF拦截：数字参数含非法字符 |
+| TC-U24 | Content-Type 设 `text/html` | 拦截：非图片类型 |
+| TC-U25 | 连续6次上传（同一IP） | 第6次限流拦截 |
+| TC-U26 | 上传 >16MB 文件 | Flask返回413 |
+| TC-U27 | 访问上传文件URL | 响应含 `X-Content-Type-Options: nosniff` |
 
 ---
 
-## 九、总结感悟
+## 九、实验总结与心得体会
 
-### 9.1 理论与实操的差距
+### 9.1 "文件上传比SQL注入更暴力" — 理论与实操的差距
 
-课堂上学了"SQL注入原理"以为理解了，实际动手才发现差距很大：
+三天的实训（SQL注入 → WAF绕过 → 文件上传）让我最震撼的认知是：**文件上传漏洞的危害比SQL注入直接得多**。
 
-- **注入点发现**：课堂demo用现成的sqlmap一把梭，手工测时连搜索框是GET还是POST都要试半天
-- **Payload构造**：学了闭合方式，但在Burp里反复调试单引号/括号/注释的空格位置才成功回显
-- **WAF绕过**：本以为换行绕过是"加个%0a就行"，结果发现会被URL解码检测加双空格检测串行拦截，远超预期
-
-### 9.2 纵深防御的启示
-
-修复过程让我真正理解了"纵深防御"不是概念而是必须：
+SQL注入从发现到利用需要走完7步探测（单引号→注释→ORDER BY→UNION→AND→系统变量→元数据），期间还要面对WAF拦截、参数化查询等防御。而文件上传漏洞：
 
 ```
-输入层     →  input_clean() WAF过滤（长度截断/关键字/注释/空白符）
-↓
-数据库层   →  参数化查询 ? 占位符（SQL注入的根源阻断）
-↓
-执行层     →  signal.alarm(2) 超时保护（SLEEP时间盲注的兜底）
-↓
-输出层     →  mask_phone/email/username 脱敏（即使注入成功也拿不到完整数据）
-↓
-异常层     →  try-except 中文提示（不暴露任何SQL细节）
+打开Burp → 改个文件名 → 点上传 → getshell
 ```
 
-任何单层防护都有被绕过的可能，5层叠加后攻击者的成本呈指数上升。
+路径就这么短。课堂演示上传WebShell到getshell全程不到30秒。亲手改包上传 `.php` 文件成功返回URL的那一刻，我才真正理解为什么老师在第一天说"文件上传是企业安全的重灾区"。
 
-### 9.3 AI Fuzz的冲击
+### 9.2 白名单 > 黑名单 — 被实践100%验证的原则
 
-用AI生成了500+字符的超长Fuzz语句手动测试，瞬间理解了为什么需要长度截断。不加限制的话，几行Python脚本就能让WAF在正则回溯中耗尽CPU。`>400直接拒绝 + [:100]安全截断` 这个策略最简单但也最有效。
+之前课堂上学"白名单优于黑名单"时觉得只是理论，但这次实训被彻底验证：
 
-### 9.4 后续学习方向
+**黑名单思路**（不可行）：阻止 `.php` → 攻击者用 `.pHp` `.PHP` `.PHP5` `.phtml` `.shtml` `.htaccess` ... 总有一个绕得过。黑名单需要穷举所有可能的恶意后缀，这在理论上不可能。
 
-- 本次只覆盖了GET/POST参数注入，HTTP Header注入和二次注入还需要学习
-- MySQL和SQLite语法有差异，生产常见MySQL的 `-- ` 带空格注释需要额外适配
-- 图灵完备的WAF（如modsecurity CRS规则集）在绕过手法上还有大量进阶内容
+**白名单思路**（可行）：只允许 `.jpg` `.jpeg` `.png` `.gif` → 不在列表里的全部拒绝。四个安全类型，一条判断语句，没有绕过空间。
+
+### 9.3 纵深防御不是概念，是12道防线
+
+如果只有后缀白名单：
+- 攻击者可上传 `.htaccess` 修改目录配置 → 让服务器把 `.png` 当PHP执行
+
+如果只有魔数校验：
+- 攻击者在真实图片尾部拼接WebShell代码 → 魔数通过但内容危险
+
+最终实现的12步流水线才是真正的纵深防御：
+
+```
+IP限流 → 文件名清洗 → 白名单校验 → 双后缀检测 → 魔数校验 → 
+内容扫描 → Content-Type → UUID存储 → 上传日志 → 安全响应头 → 
+异常捕获 → 文件大小限制
+```
+
+任何单层都能被绕过，但12层全部串联后，攻击成本呈指数上升。
+
+### 9.4 三天实训的完整学习脉络
+
+| 天数 | 主题 | 核心知识点 | 最大收获 |
+|------|------|-----------|---------|
+| Day1 | SQL手工注入 | 字符型联合查询、布尔盲注、7步探测 | 参数化查询是SQL注入的底牌 |
+| Day2 | WAF绕过防御 | 换行/注释/关键字变形绕过、双层编码 | 没有WAF是100%安全的 |
+| Day3 | 文件上传攻防 | 路径穿越、图片马、魔数校验、白名单 | 文件上传的危害比注入更直接 |
+
+这三天的学习让我认识到：**Web安全不是学几个漏洞利用手法就够了，而是建立攻击者视角的思维模式**。每写一行代码都要想"这个参数能被怎么利用"，每个功能上线前都要过一遍常见攻击手法。
 
 ---
 
-## 十、生产优化建议
+## 十、生产环境拓展优化建议
 
-### 10.1 密码安全
+### 10.1 图片二次压缩（杜绝图片马）
 
 ```python
-# 当前（仅课堂演示）
-USERS["admin"]["password"] = "admin123"        # 明文
-
-# 生产必须改为
-import bcrypt
-hashed = bcrypt.hashpw("admin123".encode(), bcrypt.gensalt())
-USERS["admin"]["password"] = hashed
+from PIL import Image
+img = Image.open(filepath)
+img.save(filepath, "PNG")  # 重新编码，丢弃所有附加的恶意代码
 ```
 
-### 10.2 验证码升级
+任何附加在图片尾部的代码在重编码后都会丢失。
 
-当前4位纯数字验证码暴力破解概率为1/10000，生产建议：
-- 增加字母混合（6位字母+数字）
-- 加入扭曲/旋转/粘连
-- Redis存储验证码并设置60秒过期
+### 10.2 独立文件服务器
 
-### 10.3 CSRF防护
-
-当前表单没有CSRF Token，生产建议：
 ```python
-import secrets
-@app.before_request
-def generate_csrf():
-    if "csrf_token" not in session:
-        session["csrf_token"] = secrets.token_hex(16)
+# 生产：应用服务器与静态文件服务器分离
+# 推荐阿里云OSS/AWS S3
+import boto3
+s3 = boto3.client("s3")
+s3.upload_fileobj(file, "my-bucket", f"avatars/{uuid_filename}")
 ```
 
-### 10.4 HTTPS强制
+即使上传了恶意文件，在独立对象存储中也无法执行。
+
+### 10.3 Redis分布式限流
 
 ```python
-# 生产环境必须
-app.config['SESSION_COOKIE_SECURE'] = True
-app.config['SESSION_COOKIE_HTTPONLY'] = True
-app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+# 当前：内存 defaultdict（进程重启后清零）
+# 生产推广：Redis计数器（持久化+分布式）
+import redis
+r = redis.Redis()
+key = f"upload_rate:{request.remote_addr}"
+if r.incr(key) > 5: return "限流"
+r.expire(key, 60)
 ```
 
-### 10.5 速率限制
+### 10.4 ClamAV病毒扫描
 
 ```python
-# 使用 Flask-Limiter 防止暴力破解
-from flask_limiter import Limiter
-limiter = Limiter(app, key_func=lambda: request.remote_addr)
-@login.route("/login", methods=["POST"])
-@limiter.limit("5 per minute")   # 每分钟最多5次登录尝试
-def login():
-    ...
+import subprocess
+result = subprocess.run(["clamscan", filepath], capture_output=True)
+if b"Infected" in result.stdout:
+    os.remove(filepath)
+    return "文件包含病毒"
 ```
 
-### 10.6 日志审计
+### 10.5 Nginx安全配置
 
-```python
-# 记录所有WAF拦截事件到独立文件
-import logging
-waf_logger = logging.getLogger("waf")
-waf_handler = logging.FileHandler("/var/log/waf_blocks.log")
-waf_logger.addHandler(waf_handler)
-
-def waf_filter(value):
-    ...
-    raise ValueError("WAF 拦截...")
-    waf_logger.warning(f"[WAF_BLOCK] {request.remote_addr} - {value}")
+```nginx
+location /static/uploads/ {
+    add_header X-Content-Type-Options nosniff;
+    add_header Content-Disposition 'attachment';  # 强制下载不执行
+    valid_referers none blocked ~.example.com;
+    if ($invalid_referer) { return 403; }
+}
 ```
 
 ---
 
-## 附录A：项目文件结构
+## 附录：完整上传防御流水线（12步）
 
 ```
-/opt/Class01/
-├── app.py                  # 主程序（v5.0 完整防护版）
-├── data/
-│   └── users.db            # SQLite数据库
-├── templates/
-│   ├── base.html           # 基础模板（导航栏含注册入口）
-│   ├── index.html          # 首页（搜索框+搜索结果脱敏表格）
-│   ├── login.html          # 登录页（验证码+忘记密码链接）
-│   ├── register.html       # 注册页（邮箱JS校验+验证码）
-│   └── forget_pwd.html     # 找回密码（两步表单+验证码）
-├── static/
-│   └── css/
-│       └── style.css       # 样式文件
-└── report.md               # 本报告
+客户端请求上传
+  ↓
+  ① IP限流 (check_rate_limit)              ← 每分钟最多5次
+  ↓
+  ② 文件名清洗 (sanitize_filename)          ← 过滤 ../ / \ %00 空格 . ::$DATA .htaccess
+  ↓
+  ③ 清洗前后对比 → 不一致则拒绝
+  ↓
+  ④ 提取后缀 → 转小写 (ext.lower)
+  ↓
+  ⑤ 白名单校验 (ALLOWED_EXTENSIONS)         ← 仅 jpg/jpeg/png/gif
+  ↓
+  ⑥ 双后缀检测 (split(".")检查中间段)
+  ↓
+  ⑦ 魔数校验 (validate_magic)               ← JPEG/PNG/GIF 头部二进制签名
+  ↓
+  ⑧ 恶意内容扫描 (scan_malicious_content)   ← 17种特征
+  ↓
+  ⑨ Content-Type 校验
+  ↓
+  ⑩ UUID 重命名存储
+  ↓
+  ⑪ 记录上传日志 (log_upload)
+  ↓
+  ⑫ try-except 异常捕获 → 中文提示
+  ↓
+  响应: X-Content-Type-Options: nosniff
 ```
-
-## 附录B：WAF过滤规则速查
-
-| 过滤层次 | 规则数 | 核心检测项 |
-|----------|--------|-----------|
-| 长度截断 | 2条 | `>400拒绝` `[:max_len]截断` |
-| 空白符 | 7种 | `\t \n \r \x0b \x0c \xa0 双空格` |
-| 注释符号 | 6种 | `/**/ /*! /*+ -- # ; */` |
-| 引号 | 3种 | `' " \`` |
-| SQL关键字 | 52个 | `union select or and order by group_concat ...` |
-| 类型校验 | 4种 | `string / digit / integer / phone / keyword` |
-
----
 
 *报告人：大二网络安全实训生*
-*日期：2026年7月20日*
+*日期：2026年7月21日*
