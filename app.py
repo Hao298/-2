@@ -11,6 +11,9 @@ import random
 import re
 import signal
 import uuid
+import datetime
+import logging
+from collections import defaultdict
 from PIL import Image, ImageDraw, ImageFont
 
 app = Flask(__name__)
@@ -507,6 +510,79 @@ def reset_pwd():
     return redirect("/login?msg=密码重置成功，请登录")
 
 
+# ===========================================================================
+# 上传模块 — 纵深防御配置
+# ===========================================================================
+
+# ① IP 限流：每 IP 每分钟最多上传 5 次
+UPLOAD_RATE_LIMIT = 5          # 最大请求次数
+UPLOAD_RATE_WINDOW = 60        # 时间窗口（秒）
+_rate_store = defaultdict(list)  # {ip: [timestamp, ...]}
+
+
+def check_rate_limit(ip):
+    """检查 IP 是否超出上传频率限制"""
+    now = datetime.datetime.now().timestamp()
+    window_start = now - UPLOAD_RATE_WINDOW
+    # 清理过期记录
+    _rate_store[ip] = [t for t in _rate_store[ip] if t > window_start]
+    if len(_rate_store[ip]) >= UPLOAD_RATE_LIMIT:
+        return False
+    _rate_store[ip].append(now)
+    return True
+
+
+# ② 上传日志器
+UPLOAD_LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs", "upload.log")
+os.makedirs(os.path.dirname(UPLOAD_LOG_PATH), exist_ok=True)
+
+upload_logger = logging.getLogger("upload_audit")
+upload_logger.setLevel(logging.INFO)
+_ul_handler = logging.FileHandler(UPLOAD_LOG_PATH, encoding="utf-8")
+_ul_handler.setFormatter(logging.Formatter("[%(asctime)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
+upload_logger.addHandler(_ul_handler)
+
+
+def log_upload(username, client_ip, original_name, stored_name):
+    """记录上传日志：用户名、客户端 IP、原始文件名、存储文件名"""
+    upload_logger.info(
+        f"USER={username}  IP={client_ip}  ORIG={original_name}  SAVE={stored_name}"
+    )
+
+
+# ③ 恶意特征过滤（文件内容级）
+MALICIOUS_PATTERNS = [
+    b"<?php", b"<?=", b"<?PHP",               # PHP 代码
+    b"<script", b"javascript:",                 # XSS 脚本
+    b"onerror=", b"onload=", b"onclick=",       # 事件处理器
+    b"eval(", b"base64_decode(", b"system(",    # 危险函数
+    b"exec(", b"passthru(", b"shell_exec(",     # 命令执行
+    b"<?xml", b"<!ENTITY",                       # XXE
+    b"#! /bin/sh", b"#! /bin/bash",             # Shell 脚本头
+    b"<%@",                                      # ASP 标记
+    b"Content-Type:",                            # 邮件头注入
+]
+
+
+def scan_malicious_content(data):
+    """扫描二进制数据中的恶意特征"""
+    data_lower = data.lower()
+    for pattern in MALICIOUS_PATTERNS:
+        if pattern in data or pattern.lower() in data_lower:
+            raise ValueError(f"上传失败：文件内容包含恶意特征 {pattern[:20]}")
+    return data
+
+
+# ④ 安全响应头 — 禁止浏览器执行 /static/uploads/ 目录下的脚本
+@app.after_request
+def set_upload_security_headers(response):
+    """为 /static/uploads/ 路径添加安全响应头"""
+    if request.path.startswith("/static/uploads/"):
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Content-Disposition"] = 'inline'
+    return response
+
+
 # ===== 用户头像上传（加固版） =====
 
 ALLOWED_EXTENSIONS = {"jpg", "jpeg", "png", "gif"}   # 白名单后缀
@@ -571,6 +647,11 @@ def upload():
             if not file or file.filename == "":
                 return render_template("upload.html", username=username, error="请选择要上传的文件")
 
+            # ⏱ 限流检查：每 IP 每分钟最多上传 5 次
+            client_ip = request.remote_addr or "0.0.0.0"
+            if not check_rate_limit(client_ip):
+                return render_template("upload.html", username=username, error="上传过于频繁，请稍后再试")
+
             original_name = file.filename
 
             # ① 文件名清洗（过滤 ../ / \ %00 + 末尾空格 + 连续点号 + .htaccess + ::$DATA）
@@ -604,6 +685,14 @@ def upload():
                 return render_template("upload.html", username=username,
                                        error="上传失败：文件头部魔数不匹配，非图片文件")
 
+            # ⑤-b 恶意特征扫描（PHP/脚本/危险函数等）
+            file_content = file.read()
+            file.seek(0)
+            try:
+                scan_malicious_content(file_content)
+            except ValueError as e:
+                return render_template("upload.html", username=username, error=str(e))
+
             # ⑥ 校验 Content-Type（仅当明确设置且非空时拦截非图片类型）
             content_type = file.content_type or ""
             if content_type and not any(content_type.startswith(prefix) for prefix in ALLOWED_MIME_PREFIXES):
@@ -617,7 +706,10 @@ def upload():
             filepath = os.path.join(upload_dir, new_filename)
             file.save(filepath)
 
-            # ⑧ 生成访问 URL
+            # ⑧ 记录上传日志
+            log_upload(username, client_ip, original_name, new_filename)
+
+            # ⑨ 生成访问 URL
             file_url = url_for("static", filename=f"uploads/{new_filename}")
 
             return render_template("upload.html", username=username, success=True,
