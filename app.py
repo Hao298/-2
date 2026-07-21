@@ -3,7 +3,7 @@
 # 【增强 WAF】全局输入清洗 + 长度截断 + 类型校验 + 数据脱敏
 # ==============================================================================
 
-from flask import Flask, render_template, request, redirect, session, make_response
+from flask import Flask, render_template, request, redirect, session, make_response, url_for, send_from_directory
 import sqlite3
 import os
 import io
@@ -14,6 +14,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 app = Flask(__name__)
 app.secret_key = "dev-key-2025"
+app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB 上传限制
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -488,6 +489,37 @@ def reset_pwd():
 
     session.pop("reset_phone", None)
     return redirect("/login?msg=密码重置成功，请登录")
+
+
+# ===== 用户头像上传 =====
+
+@app.route("/upload", methods=["GET", "POST"])
+def upload():
+    """用户头像上传 - 保存原始文件名，不做任何类型检查"""
+    username = session.get("username")
+    if not username or username not in USERS:
+        return redirect("/login")
+
+    if request.method == "POST":
+        file = request.files.get("file")
+        if not file or file.filename == "":
+            return render_template("upload.html", username=username, error="请选择要上传的文件")
+
+        # 保存到 static/uploads/ 目录，使用原始文件名
+        upload_dir = os.path.join(BASE_DIR, "static", "uploads")
+        os.makedirs(upload_dir, exist_ok=True)
+
+        # 使用用户上传的原始文件名保存
+        filename = file.filename
+        filepath = os.path.join(upload_dir, filename)
+        file.save(filepath)
+
+        # 生成可访问的 URL
+        file_url = url_for("static", filename=f"uploads/{filename}")
+
+        return render_template("upload.html", username=username, success=True, filename=filename, file_url=file_url)
+
+    return render_template("upload.html", username=username)
 
 
 if __name__ == "__main__":
