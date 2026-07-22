@@ -22,23 +22,6 @@ app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB 上传限制
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# 全局模板变量 — 注入 user_id 到所有模板
-@app.context_processor
-def inject_user_id():
-    """根据 session 中的用户名，查找对应用户的 user_id 注入到所有模板"""
-    username = session.get("username")
-    uid = None
-    if username:
-        conn = sqlite3.connect(os.path.join(BASE_DIR, "data", "users.db"))
-        try:
-            row = conn.execute("SELECT id FROM users WHERE username = ?", (username,)).fetchone()
-            if row:
-                uid = row[0]
-        except Exception:
-            pass
-        conn.close()
-    return dict(current_user_id=uid)
-
 # ---------------------------------------------------------------------------
 # 用户常量
 # ---------------------------------------------------------------------------
@@ -738,64 +721,78 @@ def upload():
     return render_template("upload.html", username=username)
 
 
-# ===== 个人中心 =====
+# ===== 个人中心（加固版 — 仅查询当前登录用户） =====
 
 @app.route("/profile")
 def profile():
-    """个人中心 - 根据 URL 参数 user_id 查询用户资料"""
-    user_id = request.args.get("user_id", "")
+    """个人中心 - 仅查询当前登录用户自身信息"""
+    try:
+        # ① 身份只从 session 读取
+        cur_username = session.get("username")
+        if not cur_username or cur_username not in USERS:
+            return redirect("/login")
 
-    # 从 SQLite 查询用户基本信息
-    conn = sqlite3.connect(os.path.join(BASE_DIR, "data", "users.db"))
-    c = conn.cursor()
-    row = c.execute("SELECT id, username, email, phone FROM users WHERE id = ?", (user_id,)).fetchone()
-    conn.close()
+        # ② 从 SQLite 查询当前登录用户 ID
+        conn = sqlite3.connect(os.path.join(BASE_DIR, "data", "users.db"))
+        c = conn.cursor()
+        row = c.execute("SELECT id, username, email, phone FROM users WHERE username = ?", (cur_username,)).fetchone()
+        conn.close()
 
-    if row is None:
-        return render_template("profile.html", username=session.get("username"), error="用户不存在")
+        if row is None:
+            return render_template("profile.html", username=cur_username, error="用户数据异常")
 
-    user_data = {
-        "id": row[0],
-        "username": row[1],
-        "email": row[2] or "",
-        "phone": row[3] or "",
-    }
+        user_data = {
+            "id": row[0],
+            "username": row[1],
+            "email": row[2] or "",
+            "phone": row[3] or "",
+        }
+        # 从 USERS 字典补充角色和余额
+        dict_user = USERS.get(row[1])
+        if dict_user:
+            user_data["role"] = dict_user.get("role", "user")
+            user_data["balance"] = dict_user.get("balance", 0)
+        else:
+            user_data["role"] = "user"
+            user_data["balance"] = 0
 
-    # 从 USERS 字典补充角色和余额
-    dict_user = USERS.get(row[1])
-    if dict_user:
-        user_data["role"] = dict_user.get("role", "user")
-        user_data["balance"] = dict_user.get("balance", 0)
-    else:
-        user_data["role"] = "user"
-        user_data["balance"] = 0
+        return render_template("profile.html", username=cur_username, user=user_data)
 
-    return render_template("profile.html", username=session.get("username"), user=user_data)
+    except Exception as e:
+        return render_template("profile.html", username=session.get("username"), error=f"查询异常：{e}")
 
 
-# ===== 充值 =====
+# ===== 充值（加固版 — session身份 + amount正数校验） =====
 
 @app.route("/recharge", methods=["POST"])
 def recharge():
-    """充值 - 直接修改用户余额，不做正负校验"""
-    user_id = request.form.get("user_id", "")
-    amount = request.form.get("amount", "0")
+    """充值 - 仅作用于当前登录用户，amount > 0 强制校验"""
+    try:
+        # ① 身份只从 session 读取
+        cur_username = session.get("username")
+        if not cur_username or cur_username not in USERS:
+            return redirect("/login")
 
-    # 从 SQLite 查询用户名
-    conn = sqlite3.connect(os.path.join(BASE_DIR, "data", "users.db"))
-    c = conn.cursor()
-    row = c.execute("SELECT username FROM users WHERE id = ?", (user_id,)).fetchone()
-    conn.close()
+        # ② amount 严格校验：必须为大于 0 的数字
+        amount_str = request.form.get("amount", "").strip()
+        if not amount_str:
+            return render_template("profile.html", username=cur_username, error="充值失败：金额不能为空")
 
-    if row is None:
-        return redirect("/profile?user_id=" + user_id)
+        try:
+            amount = float(amount_str)
+        except ValueError:
+            return render_template("profile.html", username=cur_username, error="充值失败：金额必须为数字")
 
-    username = row[0]
-    # 直接修改 USERS 字典中的余额
-    if username in USERS:
-        USERS[username]["balance"] = USERS[username]["balance"] + float(amount)
+        if amount <= 0:
+            return render_template("profile.html", username=cur_username, error="充值失败：金额必须大于 0")
 
-    return redirect("/profile?user_id=" + user_id)
+        # ③ 更新当前登录用户余额
+        USERS[cur_username]["balance"] = USERS[cur_username]["balance"] + amount
+
+        return redirect("/profile")
+
+    except Exception as e:
+        return render_template("profile.html", username=session.get("username"), error=f"充值异常：{e}")
 
 
 if __name__ == "__main__":
