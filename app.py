@@ -50,6 +50,8 @@ USERS = {
 INPUT_MAX_LEN = 100        # 单个字段最大长度
 KEYWORD_MAX_LEN = 50       # 搜索关键词最大长度
 SQL_TIMEOUT = 2            # 单条 SQL 执行超时（秒），防御 SLEEP 延时盲注
+RECHARGE_MIN = 0.01        # 单次充值最低金额
+RECHARGE_MAX = 100000      # 单次充值最高金额
 
 # SQL 敏感关键字 — 阻断课堂 7 步手工注入探测
 SQL_KEYWORDS = [
@@ -773,18 +775,24 @@ def recharge():
         if not cur_username or cur_username not in USERS:
             return redirect("/login")
 
-        # ② amount 严格校验：必须为大于 0 的数字
+        # ② amount 严格校验：只允许纯数字 + 最多一个小数点
         amount_str = request.form.get("amount", "").strip()
         if not amount_str:
             return render_template("profile.html", username=cur_username, error="充值失败：金额不能为空")
 
-        try:
-            amount = float(amount_str)
-        except ValueError:
-            return render_template("profile.html", username=cur_username, error="充值失败：金额必须为数字")
+        # 过滤换行、空格、特殊符号等畸形载荷
+        if not re.match(r'^\d+(\.\d{1,2})?$', amount_str):
+            return render_template("profile.html", username=cur_username, error="充值失败：金额必须为正整数或小数（最多两位）")
 
+        amount = float(amount_str)
         if amount <= 0:
             return render_template("profile.html", username=cur_username, error="充值失败：金额必须大于 0")
+
+        # 单次充值上下限
+        if amount < RECHARGE_MIN:
+            return render_template("profile.html", username=cur_username, error=f"充值失败：单次最低充值 {RECHARGE_MIN} 元")
+        if amount > RECHARGE_MAX:
+            return render_template("profile.html", username=cur_username, error=f"充值失败：单次最高充值 {RECHARGE_MAX} 元")
 
         # ③ 更新当前登录用户余额
         USERS[cur_username]["balance"] = USERS[cur_username]["balance"] + amount
