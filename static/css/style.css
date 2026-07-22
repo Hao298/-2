@@ -92,6 +92,14 @@ body {
     background: rgba(82, 196, 26, 0.55);
 }
 
+.nav-link-profile {
+    background: rgba(22, 119, 255, 0.35);
+}
+
+.nav-link-profile:hover {
+    background: rgba(22, 119, 255, 0.55);
+}
+
 /* ===== 主容器 ===== */
 .main-container {
     max-width: 960px;
