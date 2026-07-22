@@ -522,13 +522,13 @@ UPLOAD_RATE_WINDOW = 60        # 时间窗口（秒）
 _rate_store = defaultdict(list)  # {ip: [timestamp, ...]}
 
 
-def check_rate_limit(ip):
-    """检查 IP 是否超出上传频率限制"""
+def check_rate_limit(ip, max_requests=5, window=60):
+    """检查 IP 是否超出频率限制"""
     now = datetime.datetime.now().timestamp()
-    window_start = now - UPLOAD_RATE_WINDOW
+    window_start = now - window
     # 清理过期记录
     _rate_store[ip] = [t for t in _rate_store[ip] if t > window_start]
-    if len(_rate_store[ip]) >= UPLOAD_RATE_LIMIT:
+    if len(_rate_store[ip]) >= max_requests:
         return False
     _rate_store[ip].append(now)
     return True
@@ -549,6 +549,24 @@ def log_upload(username, client_ip, original_name, stored_name):
     """记录上传日志：用户名、客户端 IP、原始文件名、存储文件名"""
     upload_logger.info(
         f"USER={username}  IP={client_ip}  ORIG={original_name}  SAVE={stored_name}"
+    )
+
+
+# ②-b 余额审计日志器
+BALANCE_LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs", "balance.log")
+os.makedirs(os.path.dirname(BALANCE_LOG_PATH), exist_ok=True)
+
+balance_logger = logging.getLogger("balance_audit")
+balance_logger.setLevel(logging.INFO)
+_bl_handler = logging.FileHandler(BALANCE_LOG_PATH, encoding="utf-8")
+_bl_handler.setFormatter(logging.Formatter("[%(asctime)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
+balance_logger.addHandler(_bl_handler)
+
+
+def log_balance_change(username, client_ip, amount, new_balance):
+    """记录余额变动日志：用户名、IP、变更金额、操作后余额"""
+    balance_logger.info(
+        f"USER={username}  IP={client_ip}  AMOUNT={amount:+.2f}  BALANCE={new_balance:.2f}"
     )
 
 
@@ -573,6 +591,27 @@ def scan_malicious_content(data):
         if pattern in data or pattern.lower() in data_lower:
             raise ValueError(f"上传失败：文件内容包含恶意特征 {pattern[:20]}")
     return data
+
+
+# ③-b IDOR 批量探测恶意特征过滤
+IDOR_PROBE_PATTERNS = [
+    "union select", "union all select",   # SQL注入批量探测
+    "information_schema",                   # 元数据探测
+    "sleep(", "benchmark(",                 # 时间盲注
+    "1=1", "1=2", "1=0",                   # 布尔探测
+    "admin'", "admin\"",                    # 管理员账户探测
+    "/*", "*/", "--",                       # 注释符探测
+]
+
+
+def filter_idor_probe(value):
+    """拦截 IDOR 批量探测特征"""
+    if not value:
+        return value
+    val_lower = value.lower()
+    for pattern in IDOR_PROBE_PATTERNS:
+        if pattern in val_lower:
+            raise ValueError("WAF 拦截：检测到 IDOR 批量探测特征")
 
 
 # ④ 安全响应头 — 禁止浏览器执行 /static/uploads/ 目录下的脚本
@@ -746,8 +785,8 @@ def profile():
         user_data = {
             "id": row[0],
             "username": row[1],
-            "email": row[2] or "",
-            "phone": row[3] or "",
+            "email": mask_email(row[2]) if row[2] else "",
+            "phone": mask_phone(row[3]) if row[3] else "",
         }
         # 从 USERS 字典补充角色和余额
         dict_user = USERS.get(row[1])
@@ -775,6 +814,17 @@ def recharge():
         if not cur_username or cur_username not in USERS:
             return redirect("/login")
 
+        # ①-b IP 限流：每 IP 每分钟最多充值 10 次
+        client_ip = request.remote_addr or "0.0.0.0"
+        if not check_rate_limit(client_ip, max_requests=10, window=60):
+            return render_template("profile.html", username=cur_username, error="充值过于频繁，请稍后再试")
+
+        # ①-c IDOR 探测特征过滤
+        try:
+            filter_idor_probe(cur_username)
+        except ValueError as e:
+            return render_template("profile.html", username=cur_username, error=str(e))
+
         # ② amount 严格校验：只允许纯数字 + 最多一个小数点
         amount_str = request.form.get("amount", "").strip()
         if not amount_str:
@@ -796,6 +846,9 @@ def recharge():
 
         # ③ 更新当前登录用户余额
         USERS[cur_username]["balance"] = USERS[cur_username]["balance"] + amount
+
+        # ③-b 记录余额审计日志
+        log_balance_change(cur_username, client_ip, amount, USERS[cur_username]["balance"])
 
         return redirect("/profile")
 
