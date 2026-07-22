@@ -13,7 +13,7 @@
             <div class="nav-right">
                 {% if username %}
                     <span class="nav-greeting">欢迎，{{ username }}</span>
-                    <a href="/profile?user_id={{ current_user_id }}" class="nav-link nav-link-profile">个人中心</a>
+                    <a href="/profile" class="nav-link nav-link-profile">个人中心</a>
                     <a href="/upload" class="nav-link nav-link-upload">上传头像</a>
                     <a href="/logout" class="nav-link nav-link-logout">退出</a>
                 {% else %}
