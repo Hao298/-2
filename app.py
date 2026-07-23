@@ -53,6 +53,10 @@ SQL_TIMEOUT = 2            # 单条 SQL 执行超时（秒），防御 SLEEP 延
 RECHARGE_MIN = 0.01        # 单次充值最低金额
 RECHARGE_MAX = 100000      # 单次充值最高金额
 
+# 文件包含防护 — pages目录与白名单
+PAGES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pages")
+ALLOWED_PAGES = {"help", "about", "terms"}   # 第一层防护：合法页面白名单
+
 # SQL 敏感关键字 — 阻断课堂 7 步手工注入探测
 SQL_KEYWORDS = [
     "union", "select", "or", "and",            # 基本注入
@@ -856,34 +860,68 @@ def recharge():
         return render_template("profile.html", username=session.get("username"), error=f"充值异常：{e}")
 
 
-# ===== 动态页面加载 =====
+# ===== 动态页面加载（三层防护 — 文件包含 + 路径遍历 防御） =====
 
 @app.route("/page")
 def dynamic_page():
-    """动态页面加载 - 直接拼接用户输入的 name 到路径，不做任何过滤"""
+    """动态页面加载 — 已按《文件包含漏洞原理与实战利用培训》实施三层防御"""
     name = request.args.get("name", "")
     page_content = ""
 
     if name:
-        # 直接拼接用户输入的 name，不做任何路径校验
-        page_path = os.path.join("pages", name)
-        print(f"[PAGE] 尝试加载: {page_path}")
+        # =========================================================================
+        # 第三层防护：过滤课件中全部危险特征字符串与伪协议
+        # 覆盖：../ ./ \ file:// php:// data:// ftp:// expect://
+        # 对应知识点：伪协议文件包含、目录遍历字符绕过
+        # =========================================================================
+        blocked_patterns = [
+            "../", "..\\", "./", ".\\",        # 目录穿越
+            "file://", "php://", "data://",     # PHP伪协议
+            "ftp://", "expect://", "zip://",    # 其他伪协议
+            "\\\\", "%00", "\x00",              # 截断攻击
+        ]
+        name_lower = name.lower()
+        for pattern in blocked_patterns:
+            if pattern in name_lower or pattern in name:
+                page_content = "页面不存在"
+                break
 
-        # 先尝试直接读取
-        if os.path.exists(page_path):
-            with open(page_path, "r", encoding="utf-8") as f:
-                page_content = f.read()
-        else:
-            # 尝试加 .html 后缀
-            page_path_html = page_path + ".html"
-            print(f"[PAGE] 尝试加载: {page_path_html}")
-            if os.path.exists(page_path_html):
-                with open(page_path_html, "r", encoding="utf-8") as f:
+        if not page_content:
+            # =========================================================================
+            # 第一层防护：合法页面白名单
+            # 仅允许白名单内的页面名称，拦截陌生参数
+            # 对应知识点：文件包含的入口管控
+            # =========================================================================
+            page_name = name.split("/")[-1].split("\\")[-1]  # 提取纯文件名
+            if page_name not in ALLOWED_PAGES:
+                page_content = "页面不存在"
+
+        if not page_content:
+            # =========================================================================
+            # 第二层防护：路径规范化锁定 pages 根目录
+            # 将 name 拼接后转为绝对路径，校验是否以 PAGES_DIR 开头
+            # 阻断 ../ 多级目录穿越逃逸
+            # 对应知识点：路径遍历的根本性防御
+            # =========================================================================
+            safe_name = name.replace("../", "").replace("..\\", "")
+            safe_name = safe_name.replace("/", "").replace("\\", "")
+            safe_name = safe_name.replace("\x00", "")
+
+            # 尝试 .html 后缀后读取
+            page_path = os.path.join(PAGES_DIR, safe_name + ".html")
+            real_path = os.path.normpath(page_path)
+
+            # 路径前缀锁定：禁止访问 PAGES_DIR 以外的任何目录
+            if not real_path.startswith(os.path.normpath(PAGES_DIR) + os.sep) and \
+               real_path != os.path.normpath(PAGES_DIR):
+                page_content = "页面不存在"
+            elif os.path.exists(real_path):
+                with open(real_path, "r", encoding="utf-8") as f:
                     page_content = f.read()
             else:
                 page_content = "页面不存在"
 
-    # 获取当前用户信息
+    # 获取当前用户信息（原有逻辑不变）
     username = session.get("username")
     user_info = None
     if username and username in USERS:
