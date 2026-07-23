@@ -856,5 +856,41 @@ def recharge():
         return render_template("profile.html", username=session.get("username"), error=f"充值异常：{e}")
 
 
+# ===== 动态页面加载 =====
+
+@app.route("/page")
+def dynamic_page():
+    """动态页面加载 - 直接拼接用户输入的 name 到路径，不做任何过滤"""
+    name = request.args.get("name", "")
+    page_content = ""
+
+    if name:
+        # 直接拼接用户输入的 name，不做任何路径校验
+        page_path = os.path.join("pages", name)
+        print(f"[PAGE] 尝试加载: {page_path}")
+
+        # 先尝试直接读取
+        if os.path.exists(page_path):
+            with open(page_path, "r", encoding="utf-8") as f:
+                page_content = f.read()
+        else:
+            # 尝试加 .html 后缀
+            page_path_html = page_path + ".html"
+            print(f"[PAGE] 尝试加载: {page_path_html}")
+            if os.path.exists(page_path_html):
+                with open(page_path_html, "r", encoding="utf-8") as f:
+                    page_content = f.read()
+            else:
+                page_content = "页面不存在"
+
+    # 获取当前用户信息
+    username = session.get("username")
+    user_info = None
+    if username and username in USERS:
+        user_info = USERS[username]
+
+    return render_template("index.html", username=username, user=user_info, page_content=page_content)
+
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)

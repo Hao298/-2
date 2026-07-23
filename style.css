@@ -1,0 +1,336 @@
+/* ===== Reset ===== */
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+                 "Helvetica Neue", Arial, sans-serif;
+    background: #f0f2f5;
+    min-height: 100vh;
+}
+
+/* ===== 导航栏 ===== */
+.navbar {
+    background: linear-gradient(135deg, #667eea, #764ba2);
+    color: #fff;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+}
+
+.nav-inner {
+    max-width: 960px;
+    margin: 0 auto;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 24px;
+    height: 56px;
+}
+
+.brand {
+    color: #fff;
+    font-size: 18px;
+    font-weight: 600;
+    text-decoration: none;
+}
+
+.nav-right {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+}
+
+.nav-greeting {
+    font-size: 14px;
+    opacity: 0.9;
+    color: #fff;
+}
+
+.nav-link {
+    color: #fff;
+    text-decoration: none;
+    font-size: 14px;
+    padding: 6px 16px;
+    border-radius: 6px;
+    transition: background 0.2s;
+}
+
+.nav-link-login {
+    background: rgba(255, 255, 255, 0.25);
+}
+
+.nav-link-login:hover {
+    background: rgba(255, 255, 255, 0.4);
+}
+
+.nav-link-register {
+    background: rgba(82, 196, 26, 0.4);
+}
+
+.nav-link-register:hover {
+    background: rgba(82, 196, 26, 0.6);
+}
+
+.nav-link-logout {
+    background: rgba(255, 255, 255, 0.15);
+}
+
+.nav-link-logout:hover {
+    background: rgba(255, 77, 79, 0.7);
+}
+
+.nav-link-upload {
+    background: rgba(82, 196, 26, 0.35);
+}
+
+.nav-link-upload:hover {
+    background: rgba(82, 196, 26, 0.55);
+}
+
+.nav-link-profile {
+    background: rgba(22, 119, 255, 0.35);
+}
+
+.nav-link-profile:hover {
+    background: rgba(22, 119, 255, 0.55);
+}
+
+.nav-link-help {
+    background: rgba(250, 173, 20, 0.35);
+}
+
+.nav-link-help:hover {
+    background: rgba(250, 173, 20, 0.55);
+}
+
+/* ===== 主容器 ===== */
+.main-container {
+    max-width: 960px;
+    margin: 40px auto;
+    padding: 0 24px;
+}
+
+/* ===== 卡片 ===== */
+.card {
+    background: #fff;
+    border-radius: 8px;
+    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.08);
+    padding: 36px 32px 28px;
+}
+
+.card h1 {
+    font-size: 22px;
+    text-align: center;
+    margin-bottom: 24px;
+    color: #1a1a1a;
+}
+
+/* ===== 表单 ===== */
+.form-group {
+    margin-bottom: 18px;
+}
+
+.form-group label {
+    display: block;
+    font-size: 14px;
+    color: #555;
+    margin-bottom: 6px;
+}
+
+.form-group input {
+    width: 100%;
+    padding: 10px 12px;
+    border: 1px solid #d9d9d9;
+    border-radius: 6px;
+    font-size: 14px;
+    transition: border-color 0.2s;
+}
+
+.form-group input:focus {
+    outline: none;
+    border-color: #667eea;
+    box-shadow: 0 0 0 2px rgba(102, 126, 234, 0.15);
+}
+
+/* ===== 按钮 ===== */
+button,
+.btn {
+    width: 100%;
+    padding: 10px;
+    background: #667eea;
+    color: #fff;
+    border: none;
+    border-radius: 6px;
+    font-size: 15px;
+    cursor: pointer;
+    display: block;
+    text-align: center;
+    text-decoration: none;
+    transition: background 0.2s;
+}
+
+button:hover,
+.btn-primary:hover {
+    background: #764ba2;
+}
+
+.btn-primary {
+    background: #1677ff;
+}
+
+.btn-primary:hover {
+    background: #4096ff;
+}
+
+.btn-register {
+    background: #52c41a;
+}
+
+.btn-register:hover {
+    background: #73d13d;
+}
+
+.btn-danger {
+    background: #ff4d4f;
+    margin-top: 20px;
+}
+
+.btn-danger:hover {
+    background: #ff7875;
+}
+
+.btn-upload {
+    background: #1677ff;
+    margin-top: 12px;
+}
+
+.btn-upload:hover {
+    background: #4096ff;
+}
+
+/* ===== 错误消息 ===== */
+.error-msg {
+    background: #fff2f0;
+    border: 1px solid #ffccc7;
+    border-radius: 6px;
+    color: #cf1322;
+    font-size: 13px;
+    padding: 10px 14px;
+    margin-bottom: 16px;
+    text-align: center;
+}
+
+/* ===== 成功消息 ===== */
+.success-msg {
+    background: #f6ffed;
+    border: 1px solid #b7eb8f;
+    border-radius: 6px;
+    color: #52c41a;
+    font-size: 13px;
+    padding: 10px 14px;
+    margin-bottom: 16px;
+    text-align: center;
+}
+
+/* ===== 用户信息 ===== */
+.user-info {
+    margin: 16px 0;
+    border-top: 1px solid #f0f0f0;
+    padding-top: 16px;
+}
+
+.user-info table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 14px;
+}
+
+.user-info td {
+    padding: 10px 12px;
+    border-bottom: 1px solid #f5f5f5;
+}
+
+.user-info .label {
+    color: #888;
+    width: 80px;
+}
+
+.user-info .balance {
+    font-weight: bold;
+    color: #cf1322;
+}
+
+.tag {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 12px;
+}
+
+.tag-admin {
+    background: #f6ffed;
+    color: #52c41a;
+}
+
+.tag-user {
+    background: #e6f4ff;
+    color: #1677ff;
+}
+
+/* ===== 提示 ===== */
+.tip {
+    text-align: center;
+    color: #666;
+    margin-bottom: 24px;
+}
+
+/* ===== 底部链接 ===== */
+.footer-link {
+    text-align: center;
+    margin-top: 18px;
+    font-size: 13px;
+}
+
+.footer-link a {
+    color: #667eea;
+    text-decoration: none;
+}
+
+.footer-link a:hover {
+    text-decoration: underline;
+}
+
+/* ===== 动态页面内容 ===== */
+.page-content {
+    font-size: 14px;
+    color: #333;
+    line-height: 1.8;
+}
+
+.page-content h1 {
+    font-size: 22px;
+    text-align: center;
+    margin-bottom: 24px;
+    color: #1a1a1a;
+}
+
+.page-content h2 {
+    font-size: 16px;
+    margin: 20px 0 8px;
+    color: #333;
+}
+
+.page-content p {
+    margin: 8px 0;
+    color: #666;
+}
+
+.page-content ul {
+    padding-left: 20px;
+    color: #666;
+}
