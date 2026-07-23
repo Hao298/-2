@@ -100,6 +100,14 @@ body {
     background: rgba(22, 119, 255, 0.55);
 }
 
+.nav-link-help {
+    background: rgba(250, 173, 20, 0.35);
+}
+
+.nav-link-help:hover {
+    background: rgba(250, 173, 20, 0.55);
+}
+
 /* ===== 主容器 ===== */
 .main-container {
     max-width: 960px;
@@ -295,4 +303,34 @@ button:hover,
 
 .footer-link a:hover {
     text-decoration: underline;
+}
+
+/* ===== 动态页面内容 ===== */
+.page-content {
+    font-size: 14px;
+    color: #333;
+    line-height: 1.8;
+}
+
+.page-content h1 {
+    font-size: 22px;
+    text-align: center;
+    margin-bottom: 24px;
+    color: #1a1a1a;
+}
+
+.page-content h2 {
+    font-size: 16px;
+    margin: 20px 0 8px;
+    color: #333;
+}
+
+.page-content p {
+    margin: 8px 0;
+    color: #666;
+}
+
+.page-content ul {
+    padding-left: 20px;
+    color: #666;
 }

@@ -15,10 +15,12 @@
                     <span class="nav-greeting">欢迎，{{ username }}</span>
                     <a href="/profile" class="nav-link nav-link-profile">个人中心</a>
                     <a href="/upload" class="nav-link nav-link-upload">上传头像</a>
+                    <a href="/page?name=help" class="nav-link nav-link-help">帮助中心</a>
                     <a href="/logout" class="nav-link nav-link-logout">退出</a>
                 {% else %}
                     <a href="/login" class="nav-link nav-link-login">登录</a>
                     <a href="/register" class="nav-link nav-link-register">注册</a>
+                    <a href="/page?name=help" class="nav-link nav-link-help">帮助中心</a>
                 {% endif %}
             </div>
         </div>

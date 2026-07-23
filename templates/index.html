@@ -1,10 +1,19 @@
 {% extends "base.html" %}
 
-{% block title %}首页{% endblock %}
+{% block title %}{% if page_content is defined and page_content %}帮助中心{% else %}首页{% endif %}{% endblock %}
 
 {% block content %}
 
-{% if username and user %}
+{% if page_content is defined and page_content %}
+    {# ===== 动态页面内容 ===== #}
+    <div class="card">
+        <div class="page-content">{{ page_content | safe }}</div>
+        <div class="footer-link" style="margin-top:16px;">
+            <a href="/">← 返回首页</a>
+        </div>
+    </div>
+
+{% elif username and user %}
 
     {# ===== 搜索区域 ===== #}
     <div class="card" style="margin-bottom: 20px;">
@@ -90,6 +99,7 @@
 
         <a href="/profile" class="btn btn-upload" style="margin-top:12px;">个人中心</a>
         <a href="/upload" class="btn btn-upload" style="margin-top:12px;">上传头像</a>
+        <a href="/page?name=help" class="btn btn-upload" style="margin-top:12px;">帮助中心</a>
         <a href="/logout" class="btn btn-danger">退出登录</a>
     </div>
 
