@@ -13,12 +13,24 @@ import signal
 import uuid
 import datetime
 import logging
+import secrets
 from collections import defaultdict
 from PIL import Image, ImageDraw, ImageFont
 
 app = Flask(__name__)
 app.secret_key = "dev-key-2025"
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB 上传限制
+# CSRF防护：Session同源策略 — 限制Cookie在跨站请求中发送
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+
+
+# ===== CSRF防护 — 生成会话Token（对应课堂CSRF Token加固方案） =====
+
+@app.before_request
+def generate_csrf_token():
+    """每个请求前确保session中有CSRF Token"""
+    if "csrf_token" not in session:
+        session["csrf_token"] = secrets.token_hex(16)  # 32位随机十六进制Token
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -801,7 +813,8 @@ def profile():
             user_data["role"] = "user"
             user_data["balance"] = 0
 
-        return render_template("profile.html", username=cur_username, user=user_data)
+        return render_template("profile.html", username=cur_username, user=user_data,
+                               csrf_token=session.get("csrf_token"))
 
     except Exception as e:
         return render_template("profile.html", username=session.get("username"), error=f"查询异常：{e}")
@@ -930,29 +943,75 @@ def dynamic_page():
     return render_template("index.html", username=username, user=user_info, page_content=page_content)
 
 
-# ===== 修改密码 =====
+# ===== 修改密码（加固版 — CSRF Token + Referer + 身份锁定 + 旧密码校验） =====
 
 @app.route("/change-password", methods=["POST"])
 def change_password():
-    """修改密码 - 无需验证原密码，任何已登录用户可修改任何人密码"""
+    """修改密码 — 已按《XSS与CSRF攻防实战培训》CSRF防御标准加固"""
+    # ① 登录校验（未登录不可修改）
     cur_username = session.get("username")
     if not cur_username:
         return redirect("/login")
 
-    target_username = request.form.get("username", "")
+    # 获取用户信息用于错误时回显表单
+    dict_user = USERS.get(cur_username, {})
+    user_data = {
+        "id": 0, "username": cur_username,
+        "email": dict_user.get("email", ""),
+        "phone": dict_user.get("phone", ""),
+        "role": dict_user.get("role", ""),
+        "balance": dict_user.get("balance", 0),
+    }
+    sess_token = session.get("csrf_token", "")
+
+    # =========================================================================
+    # CSRF防御 ① — Token校验（对应课堂：CSRF Token缺失漏洞修复）
+    # 后端强制校验表单提交的Token与session中Token是否一致
+    # =========================================================================
+    form_token = request.form.get("csrf_token", "")
+    if not form_token or form_token != sess_token:
+        return render_template("profile.html", username=cur_username, user=user_data,
+                               error="CSRF攻击拦截：Token验证失败", csrf_token=sess_token)
+
+    # =========================================================================
+    # CSRF防御 ② — Referer来源校验（对应课堂：CSRF Referer防御）
+    # 仅允许本站域名发起的改密请求，拦截外部钓鱼站点跨站请求
+    # =========================================================================
+    referer = request.headers.get("Referer", "")
+    if referer:
+        allowed_prefixes = [
+            "http://192.168.126.133:5000", "http://127.0.0.1:5000",
+            "http://localhost:5000",
+        ]
+        if not any(referer.startswith(p) for p in allowed_prefixes):
+            return render_template("profile.html", username=cur_username, user=user_data,
+                                   error="CSRF攻击拦截：非法来源请求", csrf_token=sess_token)
+
+    # =========================================================================
+    # 水平越权修复：不从表单接收username，从session读取（对应课堂：IDOR修复）
+    # =========================================================================
+    target_username = cur_username
+
+    # =========================================================================
+    # 原密码校验（对应课堂：业务安全拓展 — 敏感操作二次验证）
+    # =========================================================================
+    old_password = request.form.get("old_password", "")
+    if USERS.get(target_username, {}).get("password") != old_password:
+        return render_template("profile.html", username=cur_username, user=user_data,
+                               error="原密码错误", csrf_token=sess_token)
+
+    # 新密码校验
     new_password = request.form.get("new_password", "")
     confirm_password = request.form.get("confirm_password", "")
-
-    if new_password != confirm_password:
-        return render_template("profile.html", username=cur_username, error="两次密码输入不一致")
-
     if not new_password:
-        return render_template("profile.html", username=cur_username, error="密码不能为空")
+        return render_template("profile.html", username=cur_username, user=user_data,
+                               error="密码不能为空", csrf_token=sess_token)
+    if new_password != confirm_password:
+        return render_template("profile.html", username=cur_username, user=user_data,
+                               error="两次密码输入不一致", csrf_token=sess_token)
 
-    # 直接更新 USERS 字典中的密码
-    if target_username in USERS:
-        USERS[target_username]["password"] = new_password
-
+    # 更新密码
+    USERS[target_username]["password"] = new_password
     return redirect("/profile")
 
 
