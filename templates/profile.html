@@ -58,7 +58,12 @@
     <div style="border-top:1px solid #f0f0f0; margin-top:20px; padding-top:20px;">
         <h2 style="font-size:18px; text-align:center; margin-bottom:16px; color:#333;">修改密码</h2>
         <form method="post" action="/change-password">
-            <input type="hidden" name="username" value="{{ user.username }}">
+            {# CSRF Token隐藏字段（对应课堂：CSRF Token加固方案） #}
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <div class="form-group">
+                <label for="old_password">原密码</label>
+                <input type="password" id="old_password" name="old_password" placeholder="请输入原密码" required>
+            </div>
             <div class="form-group">
                 <label for="new_password">新密码</label>
                 <input type="password" id="new_password" name="new_password" placeholder="请输入新密码" required>
