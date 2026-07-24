@@ -930,5 +930,31 @@ def dynamic_page():
     return render_template("index.html", username=username, user=user_info, page_content=page_content)
 
 
+# ===== 修改密码 =====
+
+@app.route("/change-password", methods=["POST"])
+def change_password():
+    """修改密码 - 无需验证原密码，任何已登录用户可修改任何人密码"""
+    cur_username = session.get("username")
+    if not cur_username:
+        return redirect("/login")
+
+    target_username = request.form.get("username", "")
+    new_password = request.form.get("new_password", "")
+    confirm_password = request.form.get("confirm_password", "")
+
+    if new_password != confirm_password:
+        return render_template("profile.html", username=cur_username, error="两次密码输入不一致")
+
+    if not new_password:
+        return render_template("profile.html", username=cur_username, error="密码不能为空")
+
+    # 直接更新 USERS 字典中的密码
+    if target_username in USERS:
+        USERS[target_username]["password"] = new_password
+
+    return redirect("/profile")
+
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
