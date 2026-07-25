@@ -3,7 +3,7 @@
 # 【增强 WAF】全局输入清洗 + 长度截断 + 类型校验 + 数据脱敏
 # ==============================================================================
 
-from flask import Flask, render_template, request, redirect, session, make_response, url_for, send_from_directory
+from flask import Flask, render_template, render_template_string, request, redirect, session, make_response, url_for, send_from_directory
 import sqlite3
 import os
 import io
@@ -1013,6 +1013,94 @@ def change_password():
     # 更新密码
     USERS[target_username]["password"] = new_password
     return redirect("/profile")
+
+
+# ===== 欢迎页 — SSTI 模板注入（render_template_string 拼接） =====
+
+@app.route("/welcome")
+def welcome():
+    """欢迎页 - 使用 render_template_string 直接拼接用户输入"""
+    name = request.args.get("name", "")
+    if not name:
+        name = "亲爱的用户"
+
+    # 直接拼接用户输入到模板字符串（存在SSTI风险）
+    html = f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><title>欢迎页</title>
+<link rel="stylesheet" href="/static/css/style.css"></head>
+<body>
+<nav class="navbar"><div class="nav-inner">
+<a href="/" class="brand">用户管理系统</a>
+<div class="nav-right">
+<a href="/" class="nav-link nav-link-login">返回首页</a>
+<a href="/welcome" class="nav-link nav-link-login">欢迎页</a>
+<a href="/feedback" class="nav-link nav-link-login">反馈</a>
+</div></div></nav>
+<main class="main-container">
+<div class="card">
+<h1>欢迎你，{name}！</h1>
+<p style="text-align:center; color:#666; margin-top:12px;">欢迎来到用户管理系统</p>
+</div></main></body></html>"""
+    return render_template_string(html)
+
+
+# ===== 反馈页 — SSTI 模板注入（render_template_string 拼接） =====
+
+@app.route("/feedback", methods=["GET", "POST"])
+def feedback():
+    """反馈页 - 使用 render_template_string 直接拼接用户输入"""
+    if request.method == "POST":
+        name = request.form.get("name", "")
+        message = request.form.get("message", "")
+
+        # 直接拼接用户输入到模板字符串（存在SSTI风险）
+        html = f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><title>反馈结果</title>
+<link rel="stylesheet" href="/static/css/style.css"></head>
+<body>
+<nav class="navbar"><div class="nav-inner">
+<a href="/" class="brand">用户管理系统</a>
+<div class="nav-right">
+<a href="/" class="nav-link nav-link-login">返回首页</a>
+<a href="/welcome" class="nav-link nav-link-login">欢迎页</a>
+<a href="/feedback" class="nav-link nav-link-login">反馈</a>
+</div></div></nav>
+<main class="main-container">
+<div class="card">
+<h2>{name} 的反馈：</h2>
+<p style="margin-top:12px; color:#333; line-height:1.6;">{message}</p>
+<a href="/feedback" style="display:inline-block; margin-top:16px; color:#667eea;">返回反馈表单</a>
+</div></main></body></html>"""
+        return render_template_string(html)
+
+    # GET 请求显示反馈表单
+    html = """<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><title>意见反馈</title>
+<link rel="stylesheet" href="/static/css/style.css"></head>
+<body>
+<nav class="navbar"><div class="nav-inner">
+<a href="/" class="brand">用户管理系统</a>
+<div class="nav-right">
+<a href="/" class="nav-link nav-link-login">返回首页</a>
+<a href="/welcome" class="nav-link nav-link-login">欢迎页</a>
+<a href="/feedback" class="nav-link nav-link-login">反馈</a>
+</div></div></nav>
+<main class="main-container">
+<div class="card">
+<h1>意见反馈</h1>
+<form method="post">
+<div class="form-group"><label for="name">姓名</label>
+<input type="text" id="name" name="name" placeholder="请输入您的姓名" required></div>
+<div class="form-group"><label for="message">留言</label>
+<textarea id="message" name="message" placeholder="请输入您的反馈内容" required
+style="width:100%; padding:10px 12px; border:1px solid #d9d9d9; border-radius:6px; font-size:14px; min-height:100px;"></textarea></div>
+<button type="submit">提交反馈</button>
+</form>
+</div></main></body></html>"""
+    return render_template_string(html)
 
 
 if __name__ == "__main__":
