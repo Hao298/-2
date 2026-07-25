@@ -108,6 +108,22 @@ body {
     background: rgba(250, 173, 20, 0.55);
 }
 
+.nav-link-welcome {
+    background: rgba(22, 180, 50, 0.3);
+}
+
+.nav-link-welcome:hover {
+    background: rgba(22, 180, 50, 0.5);
+}
+
+.nav-link-feedback {
+    background: rgba(255, 130, 0, 0.3);
+}
+
+.nav-link-feedback:hover {
+    background: rgba(255, 130, 0, 0.5);
+}
+
 /* ===== 主容器 ===== */
 .main-container {
     max-width: 960px;
