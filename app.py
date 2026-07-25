@@ -4,6 +4,7 @@
 # ==============================================================================
 
 from flask import Flask, render_template, render_template_string, request, redirect, session, make_response, url_for, send_from_directory
+from markupsafe import escape
 import sqlite3
 import os
 import io
@@ -1015,17 +1016,50 @@ def change_password():
     return redirect("/profile")
 
 
-# ===== 欢迎页 — SSTI 模板注入（render_template_string 拼接） =====
+# ===== SSTI关键字黑名单 — 第三层防护（对应课堂SSTI魔术关键字拦截） =====
+SSTI_BLOCKED_PATTERNS = [
+    "__class__", "__mro__", "__subclasses__", "__globals__",
+    "__init__", "__builtins__", "__import__", "__bases__",
+    "os", "popen", "subprocess", "eval", "exec",
+    "open(", "read(", "write(", "system(", "cat ",
+    "import ", "exec ", "eval(", "__getitem__",
+    "mro", "base64", "chr(", "ord(", "hex(",
+    "request", "config", "self", "lipsum", "cycler",
+    "joiner", "namespace", "range", "gunicorn",
+]
+
+
+def ssti_filter(value):
+    """第三层防护：SSTI黑名单关键字检测（对应课堂魔术方法拦截）"""
+    if not value:
+        return value
+    val_lower = value.lower()
+    for pattern in SSTI_BLOCKED_PATTERNS:
+        if pattern in val_lower:
+            raise ValueError("WAF 拦截：检测到SSTI模板注入特征")
+    return value
+
+
+# ===== 欢迎页（SSTI加固版 — 三层防御） =====
 
 @app.route("/welcome")
 def welcome():
-    """欢迎页 - 使用 render_template_string 直接拼接用户输入"""
+    """欢迎页 — 已按《SSTI漏洞挖掘与利用教学培训》三层防御加固"""
     name = request.args.get("name", "")
-    if not name:
-        name = "亲爱的用户"
 
-    # 直接拼接用户输入到模板字符串（存在SSTI风险）
-    html = f"""<!DOCTYPE html>
+    # 第三层防护：黑名单关键字拦截
+    try:
+        if name:
+            ssti_filter(name)
+    except ValueError as e:
+        name = str(e)
+
+    # 第二层防护：HTML转义过滤模板特殊符号
+    safe_name = escape(name) if name else "亲爱的用户"
+
+    # 第一层防护（根源修复）：固定模板字符串 + 命名参数传递
+    # render_template_string首参数为纯HTML，用户变量通过参数传递
+    html = """<!DOCTYPE html>
 <html lang="zh-CN">
 <head><meta charset="UTF-8"><title>欢迎页</title>
 <link rel="stylesheet" href="/static/css/style.css"></head>
@@ -1039,23 +1073,33 @@ def welcome():
 </div></div></nav>
 <main class="main-container">
 <div class="card">
-<h1>欢迎你，{name}！</h1>
+<h1>欢迎你，{{ name }}！</h1>
 <p style="text-align:center; color:#666; margin-top:12px;">欢迎来到用户管理系统</p>
 </div></main></body></html>"""
-    return render_template_string(html)
+    return render_template_string(html, name=safe_name)
 
 
-# ===== 反馈页 — SSTI 模板注入（render_template_string 拼接） =====
+# ===== 反馈页（SSTI加固版 — 三层防御） =====
 
 @app.route("/feedback", methods=["GET", "POST"])
 def feedback():
-    """反馈页 - 使用 render_template_string 直接拼接用户输入"""
+    """反馈页 — 已按《SSTI漏洞挖掘与利用教学培训》三层防御加固"""
     if request.method == "POST":
         name = request.form.get("name", "")
         message = request.form.get("message", "")
 
-        # 直接拼接用户输入到模板字符串（存在SSTI风险）
-        html = f"""<!DOCTYPE html>
+        # 第三层防护：黑名单关键字拦截
+        try:
+            if name:
+                ssti_filter(name)
+            if message:
+                ssti_filter(message)
+        except ValueError as e:
+            error_msg = str(e)
+            # 显示拦截提示而非原始输入
+            safe_name = escape(name)
+            safe_message = escape(error_msg)
+            html = """<!DOCTYPE html>
 <html lang="zh-CN">
 <head><meta charset="UTF-8"><title>反馈结果</title>
 <link rel="stylesheet" href="/static/css/style.css"></head>
@@ -1069,13 +1113,37 @@ def feedback():
 </div></div></nav>
 <main class="main-container">
 <div class="card">
-<h2>{name} 的反馈：</h2>
-<p style="margin-top:12px; color:#333; line-height:1.6;">{message}</p>
+<p style="text-align:center; color:#cf1322;">{{ safe_message }}</p>
 <a href="/feedback" style="display:inline-block; margin-top:16px; color:#667eea;">返回反馈表单</a>
 </div></main></body></html>"""
-        return render_template_string(html)
+            return render_template_string(html, safe_name=safe_name, safe_message=safe_message)
 
-    # GET 请求显示反馈表单
+        # 第二层防护：HTML转义过滤模板特殊符号
+        safe_name = escape(name) if name else ""
+        safe_message = escape(message) if message else ""
+
+        # 第一层防护（根源修复）：固定模板字符串 + 命名参数传递
+        html = """<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><title>反馈结果</title>
+<link rel="stylesheet" href="/static/css/style.css"></head>
+<body>
+<nav class="navbar"><div class="nav-inner">
+<a href="/" class="brand">用户管理系统</a>
+<div class="nav-right">
+<a href="/" class="nav-link nav-link-login">返回首页</a>
+<a href="/welcome" class="nav-link nav-link-login">欢迎页</a>
+<a href="/feedback" class="nav-link nav-link-login">反馈</a>
+</div></div></nav>
+<main class="main-container">
+<div class="card">
+<h2>{{ name }} 的反馈：</h2>
+<p style="margin-top:12px; color:#333; line-height:1.6;">{{ message }}</p>
+<a href="/feedback" style="display:inline-block; margin-top:16px; color:#667eea;">返回反馈表单</a>
+</div></main></body></html>"""
+        return render_template_string(html, name=safe_name, message=safe_message)
+
+    # GET 请求显示反馈表单（不含用户输入，无SSTI风险）
     html = """<!DOCTYPE html>
 <html lang="zh-CN">
 <head><meta charset="UTF-8"><title>意见反馈</title>
