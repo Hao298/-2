@@ -17,6 +17,7 @@ import logging
 import secrets
 import subprocess
 import platform
+import ipaddress
 from collections import defaultdict
 from PIL import Image, ImageDraw, ImageFont
 
@@ -1173,11 +1174,42 @@ style="width:100%; padding:10px 12px; border:1px solid #d9d9d9; border-radius:6p
     return render_template_string(html)
 
 
-# ===== Ping 网络诊断（高危 — shell=True + f-string 拼接） =====
+# ===== Ping 网络诊断（四层加固 — shell=False + IP白名单 + 长度限制 + escape输出） =====
+
+# 第三层防护：对抗反弹Shell超长Payload（对应课堂：Bash反弹、NC管道长字符串拦截）
+PING_IP_MAX_LEN = 45       # IPv6最长地址 + 安全余量
+
+
+def validate_ip(ip_str):
+    """
+    第二层防护：IP白名单校验（对应课堂：输入净化知识点）
+    使用 ipaddress 标准库严格校验合法IPv4/IPv6地址
+    拒绝包含 ; & | ` $ 等命令分隔符的恶意载荷
+    """
+    if not ip_str:
+        return False, "IP地址不能为空"
+
+    # 第三层防护：长度限制
+    if len(ip_str) > PING_IP_MAX_LEN:
+        return False, "IP地址过长"
+
+    # 检查是否包含命令注入特征（对应课堂：; & | ` $ () 管道符/分隔符）
+    dangerous_chars = set(";&|`$(){}[]<>#!\\\n\r")
+    for ch in ip_str:
+        if ch in dangerous_chars:
+            return False, "检测到非法字符，仅允许输入IP地址"
+
+    try:
+        # 使用 ipaddress 库严格校验
+        ipaddress.ip_address(ip_str)
+        return True, ""
+    except ValueError:
+        return False, "无效的IP地址格式"
+
 
 @app.route("/ping", methods=["GET", "POST"])
 def ping():
-    """Ping 网络诊断 - 使用 shell=True + f-string 拼接命令"""
+    """Ping 网络诊断 — 已按《Web安全命令执行与Shell反弹实战教学》四层防御加固"""
     username = session.get("username")
     if not username or username not in USERS:
         return redirect("/login")
@@ -1185,18 +1217,32 @@ def ping():
     result = ""
     if request.method == "POST":
         ip = request.form.get("ip", "")
-        if ip:
-            # 使用 f-string 拼接系统命令，shell=True
-            command = f"ping -c 3 {ip}"
+
+        # 第二层 + 第三层防护：IP白名单校验 + 长度限制 + 特殊字符检测
+        is_valid, error_msg = validate_ip(ip)
+        if not is_valid:
+            result = error_msg
+        else:
             try:
-                output = subprocess.check_output(command, shell=True, timeout=30, stderr=subprocess.STDOUT)
-                result = output.decode("utf-8", errors="replace")
+                # =============================================================
+                # 第一层防护（底层根源阻断 — 对应课堂：shell=False核心防御）
+                # 彻底删除f-string拼接，使用纯列表传参
+                # 关闭shell特殊字符解析能力，从根源杜绝命令注入
+                # =============================================================
+                command_list = ["ping", "-c", "3", ip]
+                output = subprocess.check_output(command_list, shell=False,
+                                                  timeout=30, stderr=subprocess.STDOUT)
+                # =============================================================
+                # 第四层防护：输出无害化（对应课堂：防止联动XSS漏洞）
+                # 使用escape转义后渲染，避免控制台输出中的恶意脚本执行
+                # =============================================================
+                result = escape(output.decode("utf-8", errors="replace"))
             except subprocess.CalledProcessError as e:
-                result = e.output.decode("utf-8", errors="replace")
+                result = escape(e.output.decode("utf-8", errors="replace"))
             except subprocess.TimeoutExpired:
                 result = "命令执行超时（30秒）"
             except Exception as e:
-                result = f"执行错误：{e}"
+                result = f"执行错误：{escape(str(e))}"
 
     return render_template("ping.html", username=username, result=result)
 
