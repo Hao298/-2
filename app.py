@@ -15,6 +15,8 @@ import uuid
 import datetime
 import logging
 import secrets
+import subprocess
+import platform
 from collections import defaultdict
 from PIL import Image, ImageDraw, ImageFont
 
@@ -1169,6 +1171,34 @@ style="width:100%; padding:10px 12px; border:1px solid #d9d9d9; border-radius:6p
 </form>
 </div></main></body></html>"""
     return render_template_string(html)
+
+
+# ===== Ping 网络诊断（高危 — shell=True + f-string 拼接） =====
+
+@app.route("/ping", methods=["GET", "POST"])
+def ping():
+    """Ping 网络诊断 - 使用 shell=True + f-string 拼接命令"""
+    username = session.get("username")
+    if not username or username not in USERS:
+        return redirect("/login")
+
+    result = ""
+    if request.method == "POST":
+        ip = request.form.get("ip", "")
+        if ip:
+            # 使用 f-string 拼接系统命令，shell=True
+            command = f"ping -c 3 {ip}"
+            try:
+                output = subprocess.check_output(command, shell=True, timeout=30, stderr=subprocess.STDOUT)
+                result = output.decode("utf-8", errors="replace")
+            except subprocess.CalledProcessError as e:
+                result = e.output.decode("utf-8", errors="replace")
+            except subprocess.TimeoutExpired:
+                result = "命令执行超时（30秒）"
+            except Exception as e:
+                result = f"执行错误：{e}"
+
+    return render_template("ping.html", username=username, result=result)
 
 
 if __name__ == "__main__":

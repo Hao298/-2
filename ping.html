@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+
+{% block title %}Ping 测试{% endblock %}
+
+{% block content %}
+<div class="card" style="margin-bottom:20px;">
+    <h1>Ping 网络诊断</h1>
+
+    <form method="post" style="display:flex; gap:10px;">
+        <input type="text" name="ip" placeholder="输入 IP 地址或域名" required
+               style="flex:1; padding:10px 12px; border:1px solid #d9d9d9; border-radius:6px; font-size:14px;">
+        <button type="submit" style="flex:0 0 auto; padding:10px 24px; background:#667eea; color:#fff; border:none; border-radius:6px; font-size:14px; cursor:pointer;">Ping</button>
+    </form>
+</div>
+
+{% if result %}
+<div class="card">
+    <h1>执行结果</h1>
+    <pre style="background:#1a1a1a; color:#00ff00; padding:16px; border-radius:6px; font-size:13px; line-height:1.5; overflow-x:auto; white-space:pre-wrap;">{{ result }}</pre>
+    <div class="footer-link" style="margin-top:14px;">
+        <a href="/ping">重新测试</a>
+    </div>
+</div>
+{% endif %}
+{% endblock %}
